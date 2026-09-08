@@ -1,0 +1,51 @@
+# ---- STM32CubeIDE / Eclipse CDT build output ----
+Debug/
+Release/
+*/Debug/
+*/Release/
+build/
+Binaries/
+
+# Compiler / linker artifacts
+*.o
+*.d
+*.su
+*.cyclo
+*.a
+*.elf
+*.bin
+*.hex
+*.srec
+*.map
+*.lst
+*.list
+
+# ---- Eclipse workspace / IDE state ----
+.metadata/
+RemoteSystemsTempFiles/
+.recommenders/
+*.launch
+.settings/language.settings.xml
+.settings/org.eclipse.cdt.*
+
+# CubeMX / CubeIDE generated scratch
+*.bak
+*.ioc.bak
+*.log
+.mxproject.old
+
+# ---- Editors ----
+.vscode/
+.idea/
+*.swp
+*~
+
+# ---- OS ----
+Thumbs.db
+ehthumbs.db
+Desktop.ini
+$RECYCLE.BIN/
+.DS_Store
+
+# ---- Tooling ----
+.claude/
