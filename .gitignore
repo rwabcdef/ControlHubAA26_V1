@@ -25,8 +25,8 @@ Binaries/
 RemoteSystemsTempFiles/
 .recommenders/
 *.launch
-.settings/language.settings.xml
-.settings/org.eclipse.cdt.*
+**/.settings/language.settings.xml
+**/.settings/org.eclipse.cdt.*
 
 # CubeMX / CubeIDE generated scratch
 *.bak

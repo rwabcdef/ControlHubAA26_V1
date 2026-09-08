@@ -120,6 +120,11 @@
 /*-----------------------------------------------------------------------------*/
 /* USER CODE BEGIN 1 */
 
+/* Web content for the httpd app. CubeMX enables LWIP_HTTPD but never generates
+   the "fsdata.c" that lwIP's fs.c includes by default; point it at ours in
+   Core/Inc instead (a .h, so it is not also compiled standalone). */
+#define HTTPD_FSDATA_FILE "fsdata_custom.h"
+
 /* USER CODE END 1 */
 
 #ifdef __cplusplus

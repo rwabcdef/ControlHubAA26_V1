@@ -23,7 +23,7 @@
 
 /* Private includes ----------------------------------------------------------*/
 /* USER CODE BEGIN Includes */
-
+#include "app_main.h"
 /* USER CODE END Includes */
 
 /* Private typedef -----------------------------------------------------------*/
@@ -686,6 +686,10 @@ void StartDefaultTask(void *argument)
   /* init code for LWIP */
   MX_LWIP_Init();
   /* USER CODE BEGIN 5 */
+  /* Hand control to the C++ application layer. Runs after MX_LWIP_Init()
+     and inside this task, which is the context the lwIP raw API needs. */
+  App_Main();
+
   /* Infinite loop */
   for(;;)
   {
