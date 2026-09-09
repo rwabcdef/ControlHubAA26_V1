@@ -37,6 +37,24 @@ extern "C" {
 /* Exported types ------------------------------------------------------------*/
 /* USER CODE BEGIN ET */
 
+/* UART2 receive plumbing.
+
+   This lives in main.h rather than uart2.h because SerLink's Reader.hpp
+   declares a UartMessage_t member and includes main.h, not uart2.h.
+
+   UART2__BUFFER_LEN must be >= SerLink Frame::MAX_FRAME_LEN, which is
+   LEN_HEADER(12) + MAX_DATALEN(64) + 2 = 78. A shorter buffer silently
+   drops any full-size frame, because the terminating newline never
+   lands inside it. */
+#define UART2__BUFFER_LEN  128
+#define UART2_QUEUE_LENGTH 5
+
+typedef struct {
+  char     data[UART2__BUFFER_LEN];
+  uint16_t len;
+  uint8_t  type;   /* UART_MSG_TYPE__* from uart2.h */
+} UartMessage_t;
+
 /* USER CODE END ET */
 
 /* Exported constants --------------------------------------------------------*/

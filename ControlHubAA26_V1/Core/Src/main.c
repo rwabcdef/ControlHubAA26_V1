@@ -21,10 +21,11 @@
 #include "cmsis_os.h"
 #include "fatfs.h"
 #include "lwip.h"
-
 /* Private includes ----------------------------------------------------------*/
 /* USER CODE BEGIN Includes */
 #include "app_main.h"
+#include "uart2.h"
+#include "main_tasks.h"
 /* USER CODE END Includes */
 
 /* Private typedef -----------------------------------------------------------*/
@@ -66,6 +67,14 @@ const osThreadAttr_t defaultTask_attributes = {
 };
 /* USER CODE BEGIN PV */
 
+/* Definitions for testTask */
+osThreadId_t testTaskHandle;
+const osThreadAttr_t testTask_attributes = {
+  .name = "testTask",
+  .stack_size = 256 * 4,
+  .priority = (osPriority_t) osPriorityNormal,
+};
+
 /* USER CODE END PV */
 
 /* Private function prototypes -----------------------------------------------*/
@@ -82,6 +91,8 @@ static void MX_USART2_UART_Init(void);
 void StartDefaultTask(void *argument);
 
 /* USER CODE BEGIN PFP */
+
+void StartTestTask(void *argument);
 
 /* USER CODE END PFP */
 
@@ -128,7 +139,12 @@ int main(void)
   MX_TIM8_Init();
   MX_USART2_UART_Init();
   MX_FATFS_Init();
+  
   /* USER CODE BEGIN 2 */
+
+  uart2_init();
+
+  initTasks();
 
   /* USER CODE END 2 */
 
@@ -156,7 +172,8 @@ int main(void)
   defaultTaskHandle = osThreadNew(StartDefaultTask, NULL, &defaultTask_attributes);
 
   /* USER CODE BEGIN RTOS_THREADS */
-  /* add threads, ... */
+  /* creation of testTask */
+  testTaskHandle = osThreadNew(StartTestTask, NULL, &testTask_attributes);
   /* USER CODE END RTOS_THREADS */
 
   /* USER CODE BEGIN RTOS_EVENTS */
@@ -666,6 +683,44 @@ static void MX_GPIO_Init(void)
 
 /* USER CODE BEGIN 4 */
 
+/**
+  * @brief  Function implementing the testTask thread.
+  * @param  argument: Not used
+  * @retval None
+  */
+void StartTestTask(void *argument)
+{
+  (void)argument;
+
+  TickType_t xLastWakeTime;
+  const TickType_t xFrequency = pdMS_TO_TICKS(10); // 10 ms period
+
+  char rxData[UART2__BUFFER_LEN];
+  char txData[UART2__BUFFER_LEN + 8]; // "echo: " + payload + "\n"
+  uint16_t rxLen;
+
+  /* Empty for now. The loop and the delay still have to be here: a
+     FreeRTOS task must never return, and spinning without osDelay would
+     starve equal-priority tasks. */
+  for(;;)
+  {
+    if (uart2_frameRx(rxData, &rxLen))
+    {
+      // trim the trailing CR/LF that terminated the frame
+      while (rxLen > 0 && (rxData[rxLen - 1] == '\n' || rxData[rxLen - 1] == '\r'))
+      {
+        rxLen--;
+      }
+
+      int txLen = snprintf(txData, sizeof(txData), "echo: %.*s\n", (int)rxLen, rxData);
+      HAL_UART_Transmit(&huart2, (uint8_t *)txData, txLen, HAL_MAX_DELAY);
+    }
+
+    //osDelay(10);
+    vTaskDelayUntil(&xLastWakeTime, xFrequency);
+  }
+}
+
 /* USER CODE END 4 */
 
 /* USER CODE BEGIN Header_StartDefaultTask */
@@ -680,6 +735,8 @@ void StartDefaultTask(void *argument)
   /* init code for LWIP */
   MX_LWIP_Init();
   /* USER CODE BEGIN 5 */
+
+  HAL_GPIO_WritePin(LD1_GPIO_Port, LD1_Pin, GPIO_PIN_SET);
   /* Hand control to the C++ application layer. Runs after MX_LWIP_Init()
      and inside this task, which is the context the lwIP raw API needs. */
   App_Main();
