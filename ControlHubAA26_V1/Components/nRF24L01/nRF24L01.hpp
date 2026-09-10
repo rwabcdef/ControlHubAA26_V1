@@ -61,7 +61,9 @@ class nRF24L01
     static const uint8_t PIPE_NONE = 0x07;
 
     // Default write() timeout. With the default setRetries(5, 15) a fully
-    // failed transmission takes 15 * 1500us = 22.5ms to give up.
+    // failed transmission gives up after 16 transmissions and 15 retry
+    // gaps: 16 * ~330us of air time plus 15 * 1500us, so roughly 28ms at
+    // 1 Mbps with a 32-byte payload. Longer at 250kbps.
     static const uint32_t DEFAULT_TX_TIMEOUT_MS = 100;
 
     enum class Mode : uint8_t
@@ -124,12 +126,22 @@ class nRF24L01
     // address is ADDRESS_LEN bytes, LSByte first, as the datasheet has it.
     // openWritingPipe() also points pipe 0 at the same address and enables
     // it, which is what auto-ack needs in order to hear the ack come back.
+    //
+    // That overwrites whatever RX address pipe 0 was using. startListening()
+    // puts it back (see openReadingPipe), so a bidirectional state machine
+    // does not have to save and restore it around every transmission.
     void openWritingPipe(const uint8_t* address);
 
     // pipe 0..5, enabled as a side effect. init() leaves every RX pipe
     // disabled, so only the pipes opened here are live. Pipes 2..5 share
     // pipe 1's upper four bytes, so for those only address[0] is used --
     // exactly as the datasheet describes.
+    //
+    // A pipe 0 address is also cached, because openWritingPipe() has to
+    // clobber the real register to receive acks; startListening() restores
+    // it from the cache. Pipe 0 is closed entirely by startListening() if
+    // it was never opened for reading, so a transmitter's own TX address
+    // cannot go on quietly matching received packets.
     void openReadingPipe(uint8_t pipe, const uint8_t* address);
 
     /* ---------------------------- operation ---------------------------- */
@@ -245,6 +257,14 @@ class nRF24L01
     // read() always drains a full payload from the FIFO, even when the
     // caller's buffer is shorter, so it needs somewhere to put the rest.
     uint8_t  rxBuffer[MAX_PAYLOAD_LEN];
+
+    // Pipe 0's RX address as the application set it, kept because
+    // openWritingPipe() has to overwrite the hardware register with the TX
+    // address for auto-ack. pipe0RxValid is false until openReadingPipe(0,
+    // ...) is called, which is how startListening() tells "restore it" from
+    // "this pipe is not for receiving at all".
+    uint8_t  pipe0RxAddress[ADDRESS_LEN];
+    bool     pipe0RxValid;
 
     SemaphoreHandle_t irqSemaphore;
     StaticSemaphore_t irqSemaphoreBuffer;

@@ -44,8 +44,10 @@ nRF24L01::nRF24L01(GPIO_TypeDef* cePort, uint16_t cePin,
   this->config       = CONFIG_EN_CRC | CONFIG_CRCO;
   this->listening    = false;
   this->irqSemaphore = nullptr;
+  this->pipe0RxValid = false;
 
   memset(this->rxBuffer, 0, MAX_PAYLOAD_LEN);
+  memset(this->pipe0RxAddress, 0, ADDRESS_LEN);
 }
 
 /* -------------------------------------------------------------------------- */
@@ -432,6 +434,16 @@ void nRF24L01::openReadingPipe(uint8_t pipe, const uint8_t* address)
   if (pipe < 2)
   {
     this->writeRegisterBuf((uint8_t)(REG_RX_ADDR_P0 + pipe), address, ADDRESS_LEN);
+
+    if (pipe == 0)
+    {
+      /* Kept so startListening() can undo openWritingPipe()'s overwrite.
+         The register itself is not a reliable place to read it back from:
+         between here and the next startListening() it may be holding the
+         TX address instead. */
+      memcpy(this->pipe0RxAddress, address, ADDRESS_LEN);
+      this->pipe0RxValid = true;
+    }
   }
   else
   {
@@ -451,6 +463,25 @@ void nRF24L01::openReadingPipe(uint8_t pipe, const uint8_t* address)
 
 void nRF24L01::startListening()
 {
+  uint8_t enabled = this->readRegister(REG_EN_RXADDR);
+
+  /* Undo openWritingPipe(). It had to point pipe 0 at the TX address so the
+     auto-ack could be heard, which destroys whatever RX address pipe 0 was
+     using -- the classic "transmitting once silently kills receiving"
+     failure. Restore it here, or close pipe 0 outright if it was never
+     opened for reading, so a transmitter's own TX address does not sit
+     there matching incoming packets. */
+  if (this->pipe0RxValid)
+  {
+    this->writeRegisterBuf(REG_RX_ADDR_P0, this->pipe0RxAddress, ADDRESS_LEN);
+    enabled |= 0x01;
+  }
+  else
+  {
+    enabled &= (uint8_t)~0x01;
+  }
+  this->writeRegister(REG_EN_RXADDR, enabled);
+
   this->config |= (CONFIG_PWR_UP | CONFIG_PRIM_RX);
   this->writeConfig();
 
