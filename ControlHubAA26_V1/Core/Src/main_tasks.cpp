@@ -4,11 +4,18 @@
  Author: Rob Woodhouse
  Created: 2026-09-08
 
+ #---------------------
+ # Teraterm (windows)
+ #   serial: baud rate: 115200
+ #   terminal: line end: CR+LF
+ #   terminal: local echo: on
+ #
  # debugSocket
- DBG00T347005hello
+ DBG00T347005hello   # will produce std ack
 
- DBG00T349002R2
-*/
+ DBG00T349002R2      # will produce ack with data "OK" (from: debugSockInstantHandler())
+
+ */
 
 #include <cstdio>
 #include <string.h>

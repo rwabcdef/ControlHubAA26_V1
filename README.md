@@ -10,6 +10,12 @@ Std usb A to micro usb B
 
 #### On dev kit hardware
 
+## External Power (external 5V power supply)
+JP3: the jumper must be in the EV5 position (left hand side most position)
+external 5V power supply: 5V0 to CN11 pin 6
+                          GND to CN11 pin 8
+
+
 ## button
 B1 USER: the user button is connected to the I/O PC13 by default (Tamper support, SB173
 ON and SB180 OFF) 
