@@ -144,8 +144,6 @@ int main(void)
 
   uart2_init();
 
-  initTasks();
-
   /* USER CODE END 2 */
 
   /* Init scheduler */
@@ -173,7 +171,9 @@ int main(void)
 
   /* USER CODE BEGIN RTOS_THREADS */
   /* creation of testTask */
-  testTaskHandle = osThreadNew(StartTestTask, NULL, &testTask_attributes);
+  //testTaskHandle = osThreadNew(StartTestTask, NULL, &testTask_attributes);
+
+  initTasks();
   /* USER CODE END RTOS_THREADS */
 
   /* USER CODE BEGIN RTOS_EVENTS */

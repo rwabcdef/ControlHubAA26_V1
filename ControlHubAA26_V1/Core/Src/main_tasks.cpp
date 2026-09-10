@@ -1,5 +1,18 @@
+/*
+ File: main_tasks.cpp
+ Description: This file contains the implementation of the main tasks for the ControlHubAA26_V1
+ Author: Rob Woodhouse
+ Created: 2026-09-08
 
+ # debugSocket
+ DBG00T347005hello
 
+ DBG00T349002R2
+*/
+
+#include <cstdio>
+#include <string.h>
+#include <stdlib.h>
 #include "main.h"
 #include "cmsis_os.h"
 #include "main_tasks.h"
@@ -37,6 +50,7 @@ const osThreadAttr_t serLink0Task_attributes = {
 void startWriter0Task(void *argument);
 void startReader0Task(void *argument);
 void startSerLink0Task(void *argument);
+bool debugSockInstantHandler(SerLink::Frame &rxFrame, uint16_t* dataLen, char* data);
 
 // This is called by transport0 when a frame is received.
 void transport0ReceiveCallback(const char* data, uint16_t dataLen){ 
@@ -111,9 +125,25 @@ void startReader0Task(void *argument)
 void startSerLink0Task(void *argument)
 {
   /* USER CODE BEGIN startSerLink0Task */
+  SerLink::Socket* debugSocket = transport0.acquireSocket("DBG00", nullptr, debugSockInstantHandler);
+
   for(;;)
   {
     transport0.run();
   }
   /* USER CODE END startSerLink0Task */
+}
+
+
+bool debugSockInstantHandler(SerLink::Frame &rxFrame, uint16_t* dataLen, char* data)
+{
+  uint8_t index = 0;
+  if(rxFrame.data[index++] == 'R')
+  {
+    memset(data, 0, 10); // clear outgoing buffer
+    strncpy(data, "OK", 2);
+    *dataLen = 2;
+    return true;
+  }
+  return false; // not handled
 }
