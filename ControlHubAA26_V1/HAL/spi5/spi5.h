@@ -5,7 +5,7 @@
  *
  * Every call here busy-waits inside the HAL until the transfer completes --
  * no interrupts, no DMA. Transfers are short (an nRF24L01 command is at most
- * 33 bytes, ~63us at 5.25 MHz) so this is cheap enough to do from a task.
+ * 33 bytes, ~50us at 5.25 MHz) so this is cheap enough to do from a task.
  *
  * Slave select
  * ------------

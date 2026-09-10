@@ -30,4 +30,13 @@ FTDI   STM32                           CN9 (female hdr lower left of board)
 TXD	-> PD6 (USART2_RX) - orange        Pin 4
 RXD	-> PD5 (USART2_TX) - yellow        Pin 6
 GND	-> GND on STM32 board - black      Pin 12
+
+## nRF24L01
+SPI5
+  PF7: SPI5_SCK
+  PF8: SPI5_MISO
+  PF9: SPI5_MOSI
+  PF10: GPIO_Output - nRF24L01 SPI (SPI5) SS (CSN)
+  PF6: GPIO_Output - nRF24L01 CE (for controlling Rx/Tx operation)
+  PF5: GPIO_EXTI5 - nRF24L01 nINT
 #--------------------------------------------------------------------
