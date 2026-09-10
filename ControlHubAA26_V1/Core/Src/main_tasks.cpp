@@ -27,8 +27,12 @@
 #include "Reader.hpp"
 #include "Transport.hpp"
 #include "uart2.h"
+#include "Button.hpp"
+#include "Led.hpp"
+#include "PWM.hpp"
+#include "TC78H611FNG.hpp"
 
-
+//--------------------------------------------------------------
 /* Definitions for writer0Task */
 osThreadId_t writer0TaskHandle;
 const osThreadAttr_t writer0Task_attributes = {
@@ -53,10 +57,20 @@ const osThreadAttr_t serLink0Task_attributes = {
   .priority = (osPriority_t) osPriorityNormal,
 };
 
+/* Definitions for ledTask */
+osThreadId_t ledTaskHandle;
+const osThreadAttr_t ledTask_attributes = {
+  .name = "ledTask",
+  .stack_size = 128 * 4,
+  .priority = (osPriority_t) osPriorityNormal,
+};
+
 //--------------------------------------------------------------
 void startWriter0Task(void *argument);
 void startReader0Task(void *argument);
 void startSerLink0Task(void *argument);
+void StartLedTask(void *argument);
+
 bool debugSockInstantHandler(SerLink::Frame &rxFrame, uint16_t* dataLen, char* data);
 
 // This is called by transport0 when a frame is received.
@@ -86,6 +100,11 @@ QueueHandle_t transport0Queue;
 
 SerLink::Transport transport0(&writer0, &reader0);
 
+//--------------------------------------------------------------
+// Board LEDs (GPIOB)
+Led ledBoardGreen(GPIOB, GPIO_PIN_0);
+
+//--------------------------------------------------------------
 void initTasks()
 {
   // Created synchronously here (rather than inside startSerLink0Task) so
@@ -103,6 +122,9 @@ void initTasks()
   reader0TaskHandle = osThreadNew(startReader0Task, NULL, &reader0Task_attributes);
 
   serLink0TaskHandle = osThreadNew(startSerLink0Task, NULL, &serLink0Task_attributes);
+
+   /* creation of ledTask */
+  ledTaskHandle = osThreadNew(StartLedTask, NULL, &ledTask_attributes);
 }
 
 void startWriter0Task(void *argument)
@@ -139,6 +161,23 @@ void startSerLink0Task(void *argument)
     transport0.run();
   }
   /* USER CODE END startSerLink0Task */
+}
+
+void StartLedTask(void *argument)
+{
+  TickType_t xLastWakeTime = xTaskGetTickCount();
+  const TickType_t xFrequency = pdMS_TO_TICKS(Led::PERIOD_MS);
+
+  ledBoardGreen.flash(0, 2, 2, false); // continuous blink: 500 ms on / 500 ms off
+
+  /* Infinite loop */
+  for(;;)
+  {
+    ledBoardGreen.run();
+
+    vTaskDelayUntil(&xLastWakeTime, xFrequency);
+  }
+  /* USER CODE END StartLedTask */
 }
 
 
