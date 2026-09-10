@@ -25,6 +25,7 @@
 /* USER CODE BEGIN Includes */
 #include "app_main.h"
 #include "uart2.h"
+#include "spi5.h"
 #include "main_tasks.h"
 /* USER CODE END Includes */
 
@@ -143,6 +144,11 @@ int main(void)
   /* USER CODE BEGIN 2 */
 
   uart2_init();
+
+  /* Drops SPI5 from the 42 MHz CubeMX leaves it at, which no device on
+     this bus can take, to 5.25 MHz. Chip selects are parked by their own
+     drivers (see nRF24L01::init()). */
+  spi5_init();
 
   /* USER CODE END 2 */
 
