@@ -132,7 +132,10 @@ Led ledBoardGreen(GPIOB, GPIO_PIN_0);
 #define RADIO_CHANNEL     76   // 2476 MHz - above most WiFi traffic
 #define RADIO_PAYLOAD_LEN 32   // fixed width, both ends. 32 -> 64 hex chars,
                                // which is exactly SerLink's Frame::MAX_DATALEN
-#define RADIO_POLL_MS     10
+#define RADIO_MODE        nRF24L01::Mode::Interrupt   // or nRF24L01::Mode::Polled
+#define RADIO_POLL_MS     10     // Mode::Polled: delay between FIFO drains
+#define RADIO_IRQ_TIMEOUT_MS 1000   // Mode::Interrupt: backstop wake if an nINT
+                                    // edge is ever missed
 
 nRF24L01 radio(nRF24L01_CE_GPIO_Port,  nRF24L01_CE_Pin,
                nRF24L01_SS_GPIO_Port,  nRF24L01_SS_Pin);
@@ -228,7 +231,7 @@ void StartLedTask(void *argument)
 //--------------------------------------------------------------
 // Radio
 //
-// Polls the nRF24L01 and forwards each received packet to the "RAD00"
+// Receives from the nRF24L01 and forwards each packet to the "RAD00"
 // SerLink socket, hex encoded. On a terminal a 32-byte packet arrives as:
 //
 //   RAD00U001064<64 hex chars>
@@ -238,9 +241,9 @@ void StartLedTask(void *argument)
 //     |   `------- type U (unidirectional - no ack requested)
 //     `----------- protocol
 //
-// To run this interrupt-driven instead, pass Mode::Interrupt to init() and
-// swap the available() poll for waitForData(); HAL_GPIO_EXTI_Callback()
-// below is already wired up. Nothing else changes.
+// RADIO_MODE selects how the task learns a packet has landed: blocking on
+// the nINT interrupt (HAL_GPIO_EXTI_Callback() below), or polling every
+// RADIO_POLL_MS. Either way each wake drains the whole RX FIFO.
 void startRadioTask(void *argument)
 {
   /* Must be byte-for-byte the array the transmitter passes to
@@ -260,7 +263,7 @@ void startRadioTask(void *argument)
   /* Retry rather than give up: init() only fails when the device is not
      answering on SPI, which on a plug-in module is usually a wiring or
      power fault that can be fixed without resetting the board. */
-  while(!radio.init(nRF24L01::Mode::Polled))
+  while(!radio.init(RADIO_MODE))
   {
     osDelay(1000);
   }
@@ -272,17 +275,30 @@ void startRadioTask(void *argument)
 
   for(;;)
   {
-    /* One packet per poll, so this loop always yields. The RX FIFO is three
-       deep and absorbs bursts, so nothing is lost as long as the average
-       arrival rate stays under 1/RADIO_POLL_MS - 100/s at 10 ms, against
-       the transmitter's 1/s. Draining the FIFO in a while() here would not
-       raise real throughput anyway: the UART downstream is the narrower
-       pipe, so it would only move the backlog into transport0Queue. */
-    if(radio.available(nullptr))
+    /* Interrupt mode wakes on an nINT falling edge, or after
+       RADIO_IRQ_TIMEOUT_MS as a backstop in case an edge is ever missed.
+       waitForData() returns immediately in polled mode, so that path needs
+       its own delay or this loop would never yield. */
+    if(RADIO_MODE == nRF24L01::Mode::Interrupt)
     {
-      uint8_t len = radio.read(payload, RADIO_PAYLOAD_LEN);
+      radio.waitForData(RADIO_IRQ_TIMEOUT_MS);
+    }
+    else
+    {
+      osDelay(RADIO_POLL_MS);
+    }
 
-      if((len > 0) && (radioSocket != nullptr))
+    /* Drain the FIFO, don't read just one. nINT is edge-triggered and read()
+       clears RX_DR, so a packet that lands while RX_DR is already set gets no
+       edge of its own: read one per wake and it sits in the FIFO until the
+       next packet arrives, leaving the task permanently behind. Each read()
+       checks RX_EMPTY after the previous iteration cleared RX_DR, so anything
+       arriving mid-loop is picked up here. Bounded in practice by the FIFO
+       depth of three. */
+    uint8_t len;
+    while((len = radio.read(payload, RADIO_PAYLOAD_LEN)) > 0)   // 0 = FIFO empty
+    {
+      if(radioSocket != nullptr)
       {
         /* Hex, not raw. SerLink frames are newline-terminated text and
            Frame::setData() copies with strncpy(), so a 0x00 anywhere in the
@@ -299,8 +315,6 @@ void startRadioTask(void *argument)
         //radioSocket->sendData(hex, hexLen, false);
       }
     }
-
-    osDelay(RADIO_POLL_MS);
   }
 }
 

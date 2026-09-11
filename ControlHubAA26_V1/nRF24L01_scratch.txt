@@ -1,0 +1,160 @@
+
+//----------------------------------------------------------------------------------------------------------------------------
+//----------------------------------------------------------------------------------------------------------------------------
+//----------------------------------------------------------------------------------------------------------------------------
+
+#include "nRF24L01.hpp"
+#include "spi5.h"
+
+//--------------------------------------------------------------
+
+//--------------------------------------------------------------
+// nRF24L01 radio on SPI5. The driver owns CE (PF6) and CSN (PF10); spi5
+// itself handles only SCK/MISO/MOSI, so the bus stays free for other slaves.
+// These three must agree with the transmitter. The values below are the
+// Arduino RF24 library's own defaults, so a sketch that only calls begin(),
+// openWritingPipe() and stopListening() needs no changes:
+//
+//   channel    76        RF24 begin() default
+//   data rate  1 Mbps    RF24 begin() default  (radio.init() sets this)
+//   payload    32 bytes  RF24 default; with dynamic payloads off - also the
+//                        default - RF24 zero-pads every write() up to it
+//
+// If the sketch calls radio.setChannel(), setDataRate() or setPayloadSize(),
+// match it here. A mismatch on any of them means silence, not corruption.
+#define RADIO_CHANNEL     76   // 2476 MHz - above most WiFi traffic
+#define RADIO_PAYLOAD_LEN 32   // fixed width, both ends. 32 -> 64 hex chars,
+                               // which is exactly SerLink's Frame::MAX_DATALEN
+#define RADIO_POLL_MS     10
+
+nRF24L01 radio(nRF24L01_CE_GPIO_Port,  nRF24L01_CE_Pin,
+               nRF24L01_SS_GPIO_Port,  nRF24L01_SS_Pin);
+
+// Acquired in initTasks() rather than inside startRadioTask(), so it is
+// guaranteed valid before startSerLink0Task() can start calling
+// transport0.run() against the socket table.
+SerLink::Socket* radioSocket = nullptr;
+
+static uint16_t bytesToHex(const uint8_t* src, uint8_t srcLen, char* dst);
+
+//--------------------------------------------------------------
+radioTaskHandle = osThreadNew(startRadioTask, NULL, &radioTask_attributes);
+
+//--------------------------------------------------------------
+// Radio
+//
+// Polls the nRF24L01 and forwards each received packet to the "RAD00"
+// SerLink socket, hex encoded. On a terminal a 32-byte packet arrives as:
+//
+//   RAD00U001064<64 hex chars>
+//   \____/|\_/\_/
+//     |   | |   `- dataLen, 64
+//     |   | `----- rollcode
+//     |   `------- type U (unidirectional - no ack requested)
+//     `----------- protocol
+//
+// To run this interrupt-driven instead, pass Mode::Interrupt to init() and
+// swap the available() poll for waitForData(); HAL_GPIO_EXTI_Callback()
+// below is already wired up. Nothing else changes.
+void startRadioTask(void *argument)
+{
+  /* Must be byte-for-byte the array the transmitter passes to
+     RF24::openWritingPipe(). Both libraries clock address[0] out first, so
+     matching the array order is what matters - there is no reversal to
+     undo at this end.
+
+     This is the Arduino's  const byte RADIO_ADDRESS[6] = "00001";  minus
+     the string literal's trailing NUL, which RF24 ignores: the address is
+     five bytes wide, and the [6] is only there to hold the terminator. */
+  static const uint8_t radioRxAddress[nRF24L01::ADDRESS_LEN] =
+    { '0', '0', '0', '0', '1' };
+
+  uint8_t payload[RADIO_PAYLOAD_LEN];
+  char    hex[SerLink::Frame::MAX_DATALEN];
+
+  /* Retry rather than give up: init() only fails when the device is not
+     answering on SPI, which on a plug-in module is usually a wiring or
+     power fault that can be fixed without resetting the board. */
+  while(!radio.init(nRF24L01::Mode::Polled))
+  {
+    osDelay(1000);
+  }
+
+  radio.setChannel(RADIO_CHANNEL);
+  radio.setPayloadLen(RADIO_PAYLOAD_LEN);
+  radio.openReadingPipe(1, radioRxAddress);
+  radio.startListening();
+
+  for(;;)
+  {
+    /* One packet per poll, so this loop always yields. The RX FIFO is three
+       deep and absorbs bursts, so nothing is lost as long as the average
+       arrival rate stays under 1/RADIO_POLL_MS - 100/s at 10 ms, against
+       the transmitter's 1/s. Draining the FIFO in a while() here would not
+       raise real throughput anyway: the UART downstream is the narrower
+       pipe, so it would only move the backlog into transport0Queue. */
+    if(radio.available(nullptr))
+    {
+      uint8_t len = radio.read(payload, RADIO_PAYLOAD_LEN);
+
+      if((len > 0) && (radioSocket != nullptr))
+      {
+        /* Hex, not raw. SerLink frames are newline-terminated text and
+           Frame::setData() copies with strncpy(), so a 0x00 anywhere in the
+           payload would truncate the frame and a '\n' would split it.
+           32 bytes -> 64 chars, exactly Frame::MAX_DATALEN. */
+        //uint16_t hexLen = bytesToHex(payload, len, hex);
+
+        uint8_t textLen = (uint8_t)strnlen((const char*)payload, len);
+
+        radioSocket->sendData((char*) payload, textLen, false);
+
+        /* ack=false: a radio packet is a notification, and blocking the
+           drain loop on a round trip would drop the next packet. */
+        //radioSocket->sendData(hex, hexLen, false);
+      }
+    }
+
+    osDelay(RADIO_POLL_MS);
+  }
+}
+
+static uint16_t bytesToHex(const uint8_t* src, uint8_t srcLen, char* dst)
+{
+  static const char digits[] = "0123456789ABCDEF";
+  uint16_t written = 0;
+
+  for(uint8_t i = 0; i < srcLen; i++)
+  {
+    dst[written++] = digits[(src[i] >> 4) & 0x0F];
+    dst[written++] = digits[ src[i]       & 0x0F];
+  }
+
+  return written;   // not NUL terminated - callers pass the length explicitly
+}
+
+/* EXTI9_5 fires for the nRF24L01 nINT line (PF5, falling edge). CubeMX
+   generates the vector and enables it at priority 7, which is numerically
+   at or below configLIBRARY_MAX_SYSCALL_INTERRUPT_PRIORITY, so the
+   FromISR call inside onIrq() is legal.
+
+   extern "C" is mandatory: without it this compiles to a mangled symbol,
+   HAL's __weak definition stays live, and the callback silently never
+   fires. See the worked example at the bottom of app_main.cpp.
+
+   Harmless in polled mode - onIrq() returns immediately when no semaphore
+   has been created, and the radio masks nINT off anyway. */
+extern "C" void HAL_GPIO_EXTI_Callback(uint16_t GPIO_Pin)
+{
+  if(GPIO_Pin == nRF24L01_nINT_Pin)
+  {
+    radio.onIrq();
+  }
+}
+
+//--------------------------------------------------------------
+
+//----------------------------------------------------------------------------------------------------------------------------
+//----------------------------------------------------------------------------------------------------------------------------
+//----------------------------------------------------------------------------------------------------------------------------
+

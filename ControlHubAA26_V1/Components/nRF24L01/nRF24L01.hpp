@@ -152,9 +152,12 @@ class nRF24L01
     // Returns to TX standby (CE low). Required before write().
     void stopListening();
 
-    // True if a packet is waiting in the RX FIFO. If pipe is non-null it
-    // receives the originating pipe number, or PIPE_NONE when there is no
-    // packet. Non-blocking, but does perform an SPI transfer.
+    // True if a packet is waiting in the RX FIFO (FIFO_STATUS.RX_EMPTY clear).
+    // Used in both modes: poll it directly in Mode::Polled, or call it after
+    // waitForData() wakes in Mode::Interrupt. If pipe is non-null it receives
+    // the originating pipe number (STATUS.RX_P_NO), or PIPE_NONE when there
+    // is no packet. Non-blocking, but performs one SPI transfer, so task
+    // context only.
     bool available(uint8_t* pipe = nullptr);
 
     // Interrupt mode: blocks until onIrq() reports an nINT edge, or the
@@ -184,7 +187,7 @@ class nRF24L01
     /* --------------------------- diagnostics --------------------------- */
 
     uint8_t getStatus();
-    uint8_t readRegister(uint8_t reg);
+    uint8_t readRegister(uint8_t reg, uint8_t* status = nullptr);
     void    writeRegister(uint8_t reg, uint8_t value);
     void    flushRx();
     void    flushTx();

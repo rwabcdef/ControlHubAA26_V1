@@ -150,7 +150,7 @@ uint8_t nRF24L01::getStatus()
   return (uint8_t)status;
 }
 
-uint8_t nRF24L01::readRegister(uint8_t reg)
+uint8_t nRF24L01::readRegister(uint8_t reg, uint8_t* status)
 {
   char tx[2];
   char rx[2] = { 0, 0 };
@@ -161,6 +161,13 @@ uint8_t nRF24L01::readRegister(uint8_t reg)
   this->csnLow();
   spi5_transfer(tx, rx, 2);
   this->csnHigh();
+
+  /* STATUS comes back on MISO alongside the command byte, so callers that
+     need both get it without a second transaction. */
+  if (status != nullptr)
+  {
+    *status = (uint8_t)rx[0];
+  }
 
   return (uint8_t)rx[1];
 }
@@ -513,11 +520,12 @@ bool nRF24L01::available(uint8_t* pipe)
   /* FIFO_STATUS.RX_EMPTY rather than STATUS.RX_DR: RX_DR is a latched
      interrupt flag, so it can be clear while packets are still queued (the
      FIFO holds three). RX_EMPTY always reflects what is actually there. */
-  bool hasData = (this->readRegister(REG_FIFO_STATUS) & FIFO_STATUS_RX_EMPTY) == 0;
+  uint8_t status = 0;
+  bool hasData = (this->readRegister(REG_FIFO_STATUS, &status) & FIFO_STATUS_RX_EMPTY) == 0;
 
   if (pipe != nullptr)
   {
-    *pipe = hasData ? (uint8_t)((this->getStatus() >> 1) & 0x07) : PIPE_NONE;
+    *pipe = hasData ? (uint8_t)((status >> 1) & 0x07) : PIPE_NONE;
   }
 
   return hasData;
@@ -557,6 +565,10 @@ uint8_t nRF24L01::read(uint8_t* data, uint8_t maxLen)
   spi5_read((char*)this->rxBuffer, this->payloadLen);
   this->csnHigh();
 
+  // Clear STATUS.RX_DR so the next packet can assert nINT.
+  // At this point it is possible that the Rx FIFO is NOT empty, e.g.,
+  // a second packet could have arrived immediately after the first, and before
+  // the first was read.
   this->writeRegister(REG_STATUS, STATUS_RX_DR);
 
   copyLen = (maxLen < this->payloadLen) ? maxLen : this->payloadLen;
