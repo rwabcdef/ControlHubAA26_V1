@@ -33,6 +33,7 @@
 #include "TC78H611FNG.hpp"
 #include "nRF24L01.hpp"
 #include "spi5.h"
+#include "Radio.hpp"
 
 //--------------------------------------------------------------
 /* Definitions for writer0Task */
@@ -83,6 +84,38 @@ const osThreadAttr_t radioTxTask_attributes = {
   .priority = (osPriority_t) osPriorityNormal,
 };
 
+/* Definitions for writer1Task */
+osThreadId_t writer1TaskHandle;
+const osThreadAttr_t writer1Task_attributes = {
+  .name = "writer1Task",
+  .stack_size = 512 * 4,
+  .priority = (osPriority_t) osPriorityNormal,
+};
+
+/* Definitions for reader1Task */
+osThreadId_t reader1TaskHandle;
+const osThreadAttr_t reader1Task_attributes = {
+  .name = "reader1Task",
+  .stack_size = 512 * 4,
+  .priority = (osPriority_t) osPriorityNormal,
+};
+
+/* Definitions for serLink1Task */
+osThreadId_t serLink1TaskHandle;
+const osThreadAttr_t serLink1Task_attributes = {
+  .name = "serLink1Task",
+  .stack_size = 512 * 4,
+  .priority = (osPriority_t) osPriorityNormal,
+};
+
+/* Definitions for radio1Task */
+osThreadId_t radio1TaskHandle;
+const osThreadAttr_t radio1Task_attributes = {
+  .name = "radio1Task",
+  .stack_size = 512 * 4,
+  .priority = (osPriority_t) osPriorityNormal,
+};
+
 //--------------------------------------------------------------
 void startWriter0Task(void *argument);
 void startReader0Task(void *argument);
@@ -90,6 +123,10 @@ void startSerLink0Task(void *argument);
 void StartLedTask(void *argument);
 void startRadioRxTask(void *argument);
 void startRadioTxTask(void *argument);
+void startWriter1Task(void *argument);
+void startReader1Task(void *argument);
+void startSerLink1Task(void *argument);
+void startRadio1Task(void *argument);
 
 bool debugSockInstantHandler(SerLink::Frame &rxFrame, uint16_t* dataLen, char* data);
 
@@ -121,6 +158,23 @@ QueueHandle_t transport0Queue;
 SerLink::Transport transport0(&writer0, &reader0);
 
 //--------------------------------------------------------------
+// SerLink1 - the same stack again, over the nRF24L01 (radio1) instead of
+// uart2. writer1 and reader1 post serialised frames to radio1.eventQueue,
+// and reader1 takes received frames from radio1.rxDataQueue.
+SerLink::Writer writer1(WRITER_CONFIG__WRITER1_ID);
+SerLink::Reader reader1(READER_CONFIG__READER1_ID);
+
+#define TRANSPORT1_QUEUE_LENGTH 5
+StaticQueue_t transport1StaticQueue;
+uint8_t transport1QueueStorageArea[TRANSPORT1_QUEUE_LENGTH * sizeof(SerLink::FrameMsg)];
+QueueHandle_t transport1Queue;
+
+SerLink::Transport transport1(&writer1, &reader1);
+
+Radio radio1(nRF24L01_CE_GPIO_Port, nRF24L01_CE_Pin,
+             nRF24L01_SS_GPIO_Port, nRF24L01_SS_Pin);
+
+//--------------------------------------------------------------
 // Board LEDs (GPIOB)
 Led ledBoardGreen(GPIOB, GPIO_PIN_0);
 
@@ -141,6 +195,7 @@ Led ledBoardGreen(GPIOB, GPIO_PIN_0);
 #define RADIO_CHANNEL     76   // 2476 MHz - above most WiFi traffic
 #define RADIO_PAYLOAD_LEN 32   // fixed width, both ends. 32 -> 64 hex chars,
                                // which is exactly SerLink's Frame::MAX_DATALEN
+#define RADIO_SERLINK     1      // 1 = SerLink1 over radio1; 0 = the test task RADIO_TEST_TX picks
 #define RADIO_TEST_TX     1      // 1 = run startRadioTxTask, 0 = startRadioRxTask
 #define RADIO_MODE        nRF24L01::Mode::Interrupt   // radioRxTask: or nRF24L01::Mode::Polled
 #define RADIO_POLL_MS     10     // Mode::Polled: delay between FIFO drains
@@ -182,9 +237,32 @@ void initTasks()
    /* creation of ledTask */
   ledTaskHandle = osThreadNew(StartLedTask, NULL, &ledTask_attributes);
 
-  // nRF24L01 test tasks, one at a time: each brings the radio up and owns it
-  // outright, and the driver is not thread-safe. Select with RADIO_TEST_TX.
-#if RADIO_TEST_TX
+  // The nRF24L01 has one owner at a time - SerLink1 through radio1, or one of
+  // the raw test tasks - since the driver is not thread-safe. Select with
+  // RADIO_SERLINK and RADIO_TEST_TX.
+#if RADIO_SERLINK
+  transport1Queue = xQueueCreateStatic(TRANSPORT1_QUEUE_LENGTH, sizeof(SerLink::FrameMsg),
+    transport1QueueStorageArea, &transport1StaticQueue);
+  transport1.init(transport1Queue);
+
+  // Before writer1/reader1: init() creates the queues they are handed.
+  radio1.init();
+
+  // Queued now, applied once radio1Task has brought the device up. SerLink
+  // needs the radio listening between transmissions or no ack ever arrives.
+  radio1.startListening();
+
+  writer1.init(radio1.eventQueue);
+  reader1.init(radio1.rxDataQueue, &writer1, transport1.queue, radio1.eventQueue);
+
+  writer1TaskHandle = osThreadNew(startWriter1Task, NULL, &writer1Task_attributes);
+
+  reader1TaskHandle = osThreadNew(startReader1Task, NULL, &reader1Task_attributes);
+
+  serLink1TaskHandle = osThreadNew(startSerLink1Task, NULL, &serLink1Task_attributes);
+
+  radio1TaskHandle = osThreadNew(startRadio1Task, NULL, &radio1Task_attributes);
+#elif RADIO_TEST_TX
   radioTxTaskHandle = osThreadNew(startRadioTxTask, NULL, &radioTxTask_attributes);
 #else
   radioRxTaskHandle = osThreadNew(startRadioRxTask, NULL, &radioRxTask_attributes);
@@ -225,6 +303,45 @@ void startSerLink0Task(void *argument)
     transport0.run();
   }
   /* USER CODE END startSerLink0Task */
+}
+
+//--------------------------------------------------------------
+// SerLink1: the same stack as SerLink0, carried by radio1 instead of uart2.
+void startWriter1Task(void *argument)
+{
+  for(;;)
+  {
+    writer1.run();
+  }
+}
+
+void startReader1Task(void *argument)
+{
+  for(;;)
+  {
+    reader1.run();
+  }
+}
+
+void startSerLink1Task(void *argument)
+{
+  // Same debug socket as SerLink0, so the far end can test the link with
+  // DBG00T349002R2 and expect "OK" back in the ack.
+  transport1.acquireSocket("DBG00", nullptr, debugSockInstantHandler);
+
+  for(;;)
+  {
+    transport1.run();
+  }
+}
+
+// Owns the nRF24L01 while RADIO_SERLINK is set: all SPI to it happens here.
+void startRadio1Task(void *argument)
+{
+  for(;;)
+  {
+    radio1.run();
+  }
 }
 
 void StartLedTask(void *argument)
@@ -406,13 +523,16 @@ static uint16_t bytesToHex(const uint8_t* src, uint8_t srcLen, char* dst)
    HAL's __weak definition stays live, and the callback silently never
    fires. See the worked example at the bottom of app_main.cpp.
 
-   Harmless in polled mode - onIrq() returns immediately when no semaphore
-   has been created, and the radio masks nINT off anyway. */
+   Both owners are called. Each onIrq() returns immediately unless its own
+   object has been initialised, and RADIO_SERLINK makes sure only one ever
+   is. The test driver's onIrq() also does nothing in polled mode, where
+   nINT is masked off anyway. */
 extern "C" void HAL_GPIO_EXTI_Callback(uint16_t GPIO_Pin)
 {
   if(GPIO_Pin == nRF24L01_nINT_Pin)
   {
     radio.onIrq();
+    radio1.onIrq();
   }
 }
 

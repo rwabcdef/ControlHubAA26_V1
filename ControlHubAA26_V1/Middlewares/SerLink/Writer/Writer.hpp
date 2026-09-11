@@ -14,6 +14,7 @@
  #include "Frame.hpp"
  #include "FreeRTOS.h"
  #include "queue.h"
+ #include "RadioMsg.hpp"
 
 
  namespace SerLink
@@ -44,6 +45,11 @@
    uint8_t ackQueueStorageArea[ACK_QUEUE_LENGTH * sizeof(Frame)];
    QueueHandle_t ackQueue;
 
+   // Set by init(). When non-null, uartWrite() posts each serialised frame
+   // here as a RadioMsg TX_DATA (e.g. to Radio::eventQueue) instead of
+   // writing it to a uart.
+   QueueHandle_t extTxOutQueue;
+
    uint8_t idle();
    uint8_t ackWait();
 
@@ -56,7 +62,9 @@
    static const uint8_t STATUS_PROTOCOL_ERROR = 52;
 
    Writer(uint8_t id);
-   void init();
+   // extTxOutQueue: leave null to write to the uart chosen by id; set it to
+   // send frames through another link instead (see uartWrite()).
+   void init(QueueHandle_t extTxOutQueue = nullptr);
    void run();
 
    // Used to send frame. Non-blocking: returns 1 (rather than blocking the

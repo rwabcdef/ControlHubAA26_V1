@@ -23,5 +23,11 @@
  
  
  
+ //----------------------------------------------------------
+ // WRITER1 - SerLink1, over the radio. It writes to the extTxOutQueue passed
+ // to init() rather than a uart, so it has no WRITER_CONFIG__WRITER1 switch.
+ #define WRITER_CONFIG__WRITER1_ID 2 // WRITER1 instance id
+ //----------------------------------------------------------
+
  #endif /* WRITER_CONFIG_HPP_ */
  

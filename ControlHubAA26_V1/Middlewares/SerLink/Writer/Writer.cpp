@@ -17,13 +17,19 @@
 
 using namespace SerLink;
 
-Writer::Writer(uint8_t id): id(id)
+// A TX_DATA RadioMsg has to hold the longest string Frame::toString() writes,
+// NUL included.
+static_assert(RADIOMSG__FRAME_LEN_MAX >= Frame::MAX_FRAME_LEN,
+  "RADIOMSG__FRAME_LEN_MAX is too small for a serialised SerLink frame");
+
+Writer::Writer(uint8_t id): id(id), extTxOutQueue(nullptr)
 {
 }
 
-void Writer::init()
+void Writer::init(QueueHandle_t extTxOutQueue)
 {
   this->id = id;
+  this->extTxOutQueue = extTxOutQueue;
   this->currentState = IDLE;
   this->status = Writer::STATUS_IDLE;
 
@@ -166,6 +172,13 @@ uint8_t Writer::ackWait()
 
 uint8_t Writer::uartWrite(char* buffer)
 {
+  // Checked before the id mapping, so an instance with an external queue can
+  // never also write to a uart.
+  if(this->extTxOutQueue != nullptr)
+  {
+    return RadioMsg::queueTxData(this->extTxOutQueue, buffer);
+  }
+
 #ifdef WRITER_CONFIG__WRITER0
 
   if(this->id == WRITER_CONFIG__WRITER0_ID)

@@ -19,9 +19,11 @@ Reader::Reader(uint8_t id): id(id)
   this->currentState = IDLE;
 }
 
-void Reader::init(QueueHandle_t uartRxQueue, Writer* writer, QueueHandle_t consumerQueue)
+void Reader::init(QueueHandle_t uartRxQueue, Writer* writer, QueueHandle_t consumerQueue,
+  QueueHandle_t extTxOutQueue)
 {
   this->uartRxQueue = uartRxQueue;
+  this->extTxOutQueue = extTxOutQueue;
   this->writer = writer;
   this->consumerQueue = consumerQueue;
   this->numInstantHandlers = 0;
@@ -100,7 +102,7 @@ uint8_t Reader::idle()
       // pass the received frame to the consumer queue if it exists
       if(this->consumerQueue != nullptr)
       {
-        this->rxFrameMsg.frame.copy(&this->rxFrame);
+        this->rxFrame.copy(&this->rxFrameMsg.frame);
         this->rxFrameMsg.type = FrameMsg::TYPE_RX;
 
         xQueueSend(this->consumerQueue, &this->rxFrameMsg, 0);
@@ -118,7 +120,7 @@ uint8_t Reader::idle()
       // also send the ack frame to the consumer queue if it exists - it can contain data (piggy-backing)
       if(this->consumerQueue != nullptr)
       {
-        this->rxFrameMsg.frame.copy(&this->rxFrame);
+        this->rxFrame.copy(&this->rxFrameMsg.frame);
         this->rxFrameMsg.type = FrameMsg::TYPE_ACK; 
         xQueueSend(this->consumerQueue, &this->rxFrameMsg, 0);
       }
@@ -149,6 +151,13 @@ uint8_t Reader::txAck()
 
 uint8_t Reader::uartWrite(char* buffer)
 {
+  // Checked before the id mapping, so an instance with an external queue can
+  // never also write to a uart.
+  if(this->extTxOutQueue != nullptr)
+  {
+    return RadioMsg::queueTxData(this->extTxOutQueue, buffer);
+  }
+
 #ifdef READER_CONFIG__READER0
 
   if(this->id == READER_CONFIG__READER0_ID)

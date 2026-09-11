@@ -16,6 +16,7 @@
 #include "Frame.hpp"
 #include "FreeRTOS.h"
 #include "queue.h"
+#include "RadioMsg.hpp"
  
  #if defined(ENV_CONFIG__SYSTEM_PC)
  #include "DebugPrint.hpp"
@@ -55,6 +56,7 @@
      Writer* writer = nullptr;
      QueueHandle_t uartRxQueue = nullptr; // Queue for receiving messages from the UART layer
      QueueHandle_t consumerQueue = nullptr; // Queue for passing received frames to the consumer
+     QueueHandle_t extTxOutQueue = nullptr; // When set, acks go here as RadioMsg TX_DATA instead of to a uart
     //  char* rxBuffer;
     //  char* ackBuffer;
     //  uint8_t bufferLen;
@@ -101,7 +103,7 @@
     //      Frame* rxFrame, Frame* ackFrame, Writer* writer = nullptr); // , DebugPrint* debugPrint = nullptr
     Reader(uint8_t id); // , DebugPrint* debugPrint = nullptr
    void init(QueueHandle_t uartRxQueue, Writer* writer = nullptr,
-    QueueHandle_t consumerQueue = nullptr);
+    QueueHandle_t consumerQueue = nullptr, QueueHandle_t extTxOutQueue = nullptr);
      void run();
      bool registerInstantCallback(char* protocol, readHandler handler);
      bool getRxFrame(Frame* rxFrame);
