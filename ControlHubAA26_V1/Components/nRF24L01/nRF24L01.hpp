@@ -146,7 +146,9 @@ class nRF24L01
 
     /* ---------------------------- operation ---------------------------- */
 
-    // Enters RX mode and starts listening (CE high).
+    // Enters RX mode and starts listening (CE high). Leaves the RX FIFO
+    // alone, so packets received before a stopListening() / write()
+    // excursion are still there to read afterwards.
     void startListening();
 
     // Returns to TX standby (CE low). Required before write().

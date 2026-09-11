@@ -67,10 +67,18 @@ const osThreadAttr_t ledTask_attributes = {
   .priority = (osPriority_t) osPriorityNormal,
 };
 
-/* Definitions for radioTask */
-osThreadId_t radioTaskHandle;
-const osThreadAttr_t radioTask_attributes = {
-  .name = "radioTask",
+/* Definitions for radioRxTask */
+osThreadId_t radioRxTaskHandle;
+const osThreadAttr_t radioRxTask_attributes = {
+  .name = "radioRxTask",
+  .stack_size = 512 * 4,
+  .priority = (osPriority_t) osPriorityNormal,
+};
+
+/* Definitions for radioTxTask */
+osThreadId_t radioTxTaskHandle;
+const osThreadAttr_t radioTxTask_attributes = {
+  .name = "radioTxTask",
   .stack_size = 512 * 4,
   .priority = (osPriority_t) osPriorityNormal,
 };
@@ -80,7 +88,8 @@ void startWriter0Task(void *argument);
 void startReader0Task(void *argument);
 void startSerLink0Task(void *argument);
 void StartLedTask(void *argument);
-void startRadioTask(void *argument);
+void startRadioRxTask(void *argument);
+void startRadioTxTask(void *argument);
 
 bool debugSockInstantHandler(SerLink::Frame &rxFrame, uint16_t* dataLen, char* data);
 
@@ -132,15 +141,17 @@ Led ledBoardGreen(GPIOB, GPIO_PIN_0);
 #define RADIO_CHANNEL     76   // 2476 MHz - above most WiFi traffic
 #define RADIO_PAYLOAD_LEN 32   // fixed width, both ends. 32 -> 64 hex chars,
                                // which is exactly SerLink's Frame::MAX_DATALEN
-#define RADIO_MODE        nRF24L01::Mode::Interrupt   // or nRF24L01::Mode::Polled
+#define RADIO_TEST_TX     1      // 1 = run startRadioTxTask, 0 = startRadioRxTask
+#define RADIO_MODE        nRF24L01::Mode::Interrupt   // radioRxTask: or nRF24L01::Mode::Polled
 #define RADIO_POLL_MS     10     // Mode::Polled: delay between FIFO drains
 #define RADIO_IRQ_TIMEOUT_MS 1000   // Mode::Interrupt: backstop wake if an nINT
                                     // edge is ever missed
+#define RADIO_TX_PERIOD_MS   3000   // radioTxTask: one count packet per period
 
 nRF24L01 radio(nRF24L01_CE_GPIO_Port,  nRF24L01_CE_Pin,
                nRF24L01_SS_GPIO_Port,  nRF24L01_SS_Pin);
 
-// Acquired in initTasks() rather than inside startRadioTask(), so it is
+// Acquired in initTasks() rather than inside startRadioRxTask(), so it is
 // guaranteed valid before startSerLink0Task() can start calling
 // transport0.run() against the socket table.
 SerLink::Socket* radioSocket = nullptr;
@@ -171,7 +182,13 @@ void initTasks()
    /* creation of ledTask */
   ledTaskHandle = osThreadNew(StartLedTask, NULL, &ledTask_attributes);
 
-  radioTaskHandle = osThreadNew(startRadioTask, NULL, &radioTask_attributes);
+  // nRF24L01 test tasks, one at a time: each brings the radio up and owns it
+  // outright, and the driver is not thread-safe. Select with RADIO_TEST_TX.
+#if RADIO_TEST_TX
+  radioTxTaskHandle = osThreadNew(startRadioTxTask, NULL, &radioTxTask_attributes);
+#else
+  radioRxTaskHandle = osThreadNew(startRadioRxTask, NULL, &radioRxTask_attributes);
+#endif
 }
 
 void startWriter0Task(void *argument)
@@ -229,7 +246,7 @@ void StartLedTask(void *argument)
 
 
 //--------------------------------------------------------------
-// Radio
+// Radio receive
 //
 // Receives from the nRF24L01 and forwards each packet to the "RAD00"
 // SerLink socket, hex encoded. On a terminal a 32-byte packet arrives as:
@@ -244,7 +261,7 @@ void StartLedTask(void *argument)
 // RADIO_MODE selects how the task learns a packet has landed: blocking on
 // the nINT interrupt (HAL_GPIO_EXTI_Callback() below), or polling every
 // RADIO_POLL_MS. Either way each wake drains the whole RX FIFO.
-void startRadioTask(void *argument)
+void startRadioRxTask(void *argument)
 {
   /* Must be byte-for-byte the array the transmitter passes to
      RF24::openWritingPipe(). Both libraries clock address[0] out first, so
@@ -315,6 +332,54 @@ void startRadioTask(void *argument)
         //radioSocket->sendData(hex, hexLen, false);
       }
     }
+  }
+}
+
+//--------------------------------------------------------------
+// Radio transmit
+//
+// Every RADIO_TX_PERIOD_MS sends "stm cnt: <n>", n counting up from 0. The
+// count advances on every attempt, acked or not, so gaps in the sequence at
+// the far end show lost packets.
+//
+// The far end must be listening on radioTxAddress: for an Arduino RF24
+// sketch,  radio.openReadingPipe(1, "00002")  then  radio.startListening().
+// Auto-ack is on, so a write() that nobody acks runs to MAX_RT (~28 ms) and
+// returns false.
+void startRadioTxTask(void *argument)
+{
+  /* Same byte order as radioRxAddress: address[0] goes out first, matching
+     the array the Arduino passes to openReadingPipe(). */
+  static const uint8_t radioTxAddress[nRF24L01::ADDRESS_LEN] =
+    { '0', '0', '0', '0', '1' };
+
+  uint32_t count = 0;
+  char     msg[nRF24L01::MAX_PAYLOAD_LEN];
+
+  /* Polled whatever RADIO_MODE says: write() learns how each transmission
+     ended by polling STATUS, so nINT would have nothing to wake. */
+  while(!radio.init(nRF24L01::Mode::Polled))
+  {
+    osDelay(1000);
+  }
+
+  radio.setChannel(RADIO_CHANNEL);
+  radio.setPayloadLen(RADIO_PAYLOAD_LEN);   // before openWritingPipe(), which sizes pipe 0 from it
+
+  /* Once is enough. init() leaves the radio in TX standby and nothing here
+     calls startListening(), which is what would close pipe 0 and stop
+     write() hearing the auto-ack. */
+  radio.openWritingPipe(radioTxAddress);
+
+  for(;;)
+  {
+    // write() zero-pads to the payload width, so the NUL goes out too.
+    int msgLen = snprintf(msg, sizeof(msg), "stm cnt: %lu", (unsigned long)count);
+
+    radio.write((const uint8_t*)msg, (uint8_t)msgLen);
+    count++;
+
+    osDelay(RADIO_TX_PERIOD_MS);
   }
 }
 

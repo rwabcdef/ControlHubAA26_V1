@@ -492,8 +492,11 @@ void nRF24L01::startListening()
   this->config |= (CONFIG_PWR_UP | CONFIG_PRIM_RX);
   this->writeConfig();
 
+  /* No flushRx() here. Anything already in the RX FIFO has been acked, so
+     the transmitter will not resend it: flushing on every return to RX would
+     silently discard whatever arrived just before a transmission. init()
+     flushes once at bring-up. */
   this->writeRegister(REG_STATUS, STATUS_RX_DR | STATUS_TX_DS | STATUS_MAX_RT);
-  this->flushRx();
   this->flushTx();
 
   this->ceHigh();
