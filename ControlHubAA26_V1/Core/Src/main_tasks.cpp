@@ -34,7 +34,7 @@
 #include "nRF24L01.hpp"
 #include "spi5.h"
 #include "Radio.hpp"
-#include "MqttPublisher.hpp"
+#include "MqttPubSub.hpp"
 #include "lwip/netif.h"
 
 //--------------------------------------------------------------
@@ -126,6 +126,14 @@ const osThreadAttr_t mqttTask_attributes = {
   .priority = (osPriority_t) osPriorityNormal,
 };
 
+/* Definitions for mqttRxTask */
+osThreadId_t mqttRxTaskHandle;
+const osThreadAttr_t mqttRxTask_attributes = {
+  .name = "mqttRxTask",
+  .stack_size = 512 * 4,
+  .priority = (osPriority_t) osPriorityNormal,
+};
+
 //--------------------------------------------------------------
 void startWriter0Task(void *argument);
 void startReader0Task(void *argument);
@@ -138,6 +146,7 @@ void startReader1Task(void *argument);
 void startSerLink1Task(void *argument);
 void startRadio1Task(void *argument);
 void startMqttTask(void *argument);
+void startMqttRxTask(void *argument);
 
 bool debugSockInstantHandler(SerLink::Frame &rxFrame, uint16_t* dataLen, char* data);
 
@@ -224,6 +233,26 @@ SerLink::Socket* radioSocket = nullptr;
 
 static uint16_t bytesToHex(const uint8_t* src, uint8_t srcLen, char* dst);
 
+
+SerLink::Socket* mqttSocket = nullptr;
+
+//--------------------------------------------------------------
+// MQTT over lwIP. mqttTask keeps the connection up and publishes a count;
+// mqttRxTask handles messages arriving on MQTT_SUB_TOPIC.
+#define MQTT_BROKER_IP          "192.168.0.196"
+#define MQTT_BROKER_PORT        1883
+#define MQTT_CLIENT_ID          "stm32-controlhub"   // must be unique on the broker
+#define MQTT_TOPIC              "test/hello"         // published to
+#define MQTT_SUB_TOPIC          "test/stm32/cmd"     // subscribed to. Not MQTT_TOPIC,
+                                                     // or the board hears its own publishes
+#define MQTT_PUBLISH_PERIOD_MS  3000
+
+extern struct netif gnetif;   // lwip.c
+
+// The constructor only stores its arguments, so a global is safe here - the
+// lwIP client itself is allocated on the first connect().
+MqttPubSub mqtt(MQTT_BROKER_IP, MQTT_BROKER_PORT, MQTT_CLIENT_ID);
+
 //--------------------------------------------------------------
 void initTasks()
 {
@@ -248,8 +277,14 @@ void initTasks()
    /* creation of ledTask */
   ledTaskHandle = osThreadNew(StartLedTask, NULL, &ledTask_attributes);
 
-  /* creation of mqttTask */
+  /* creation of mqttTask and mqttRxTask */
+  // Creates mqtt.rxQueue, before mqttRxTask can block on it. Subscribing has
+  // to wait for lwIP, so that happens in mqttTask.
+  mqtt.init();
+
   mqttTaskHandle = osThreadNew(startMqttTask, NULL, &mqttTask_attributes);
+
+  mqttRxTaskHandle = osThreadNew(startMqttRxTask, NULL, &mqttRxTask_attributes);
 
   // The nRF24L01 has one owner at a time - SerLink1 through radio1, or one of
   // the raw test tasks - since the driver is not thread-safe. Select with
@@ -381,31 +416,24 @@ void StartLedTask(void *argument)
 // Every MQTT_PUBLISH_PERIOD_MS publishes "msg stm32: <n>" to MQTT_TOPIC, n
 // counting up from 0. While not connected it retries the connection once per
 // period instead, so the broker can start after the board, or restart.
-#define MQTT_BROKER_IP          "192.168.0.196"
-#define MQTT_BROKER_PORT        1883
-#define MQTT_CLIENT_ID          "stm32-controlhub"   // must be unique on the broker
-#define MQTT_TOPIC              "test/hello"
-#define MQTT_PUBLISH_PERIOD_MS  3000
-
-extern struct netif gnetif;   // lwip.c
-
-// The constructor only stores its arguments, so a global is safe here - the
-// lwIP client itself is allocated on the first connect().
-MqttPublisher mqtt(MQTT_BROKER_IP, MQTT_BROKER_PORT, MQTT_CLIENT_ID);
-
 void startMqttTask(void *argument)
 {
   uint32_t count = 0;
   char     msg[32];
 
   /* initTasks() runs before StartDefaultTask() calls MX_LWIP_Init(), which
-     creates the tcpip core lock every MqttPublisher method takes. The netif
-     is only brought up after that, so it is the signal that lwIP is ready.
-     Waiting for the link as well saves a connect that could only time out. */
+     creates the tcpip core lock every MqttPubSub method (bar receive()) takes.
+     The netif is only brought up after that, so it is the signal that lwIP
+     is ready. Waiting for the link as well saves a connect that could only
+     time out. */
   while(!netif_is_up(&gnetif) || !netif_is_link_up(&gnetif))
   {
     osDelay(500);
   }
+
+  // Only recorded here. Sent once the broker accepts the connection, and
+  // again after every reconnect.
+  mqtt.subscribe(MQTT_SUB_TOPIC);
 
   for(;;)
   {
@@ -423,6 +451,39 @@ void startMqttTask(void *argument)
     }
 
     osDelay(MQTT_PUBLISH_PERIOD_MS);
+  }
+}
+
+//--------------------------------------------------------------
+// MQTT receive
+//
+// Handles each message arriving on MQTT_SUB_TOPIC. For now it just echoes
+// the payload to MQTT_TOPIC as "stm32 rx: <payload>", so a message published
+// to test/stm32/cmd from another machine shows up on the existing test/hello
+// subscriber. Replace with real command handling.
+void startMqttRxTask(void *argument)
+{
+  MqttPubSub::Message rxMsg;
+  char reply[16 + MqttPubSub::MAX_PAYLOAD_LEN];
+
+  mqttSocket = transport0.acquireSocket("MQTT0", nullptr, nullptr);  // for debugging
+
+  for(;;)
+  {
+    /* Blocks until a message arrives. Safe before lwIP is up: rxQueue exists
+       from mqtt.init(), and nothing can be posted to it until then anyway -
+       which also means lwIP is up by the time publish() below runs. */
+    if(mqtt.receive(rxMsg))
+    {
+      // int replyLen = snprintf(reply, sizeof(reply), "stm32 rx: %s", rxMsg.payload);
+
+      // mqtt.publish(MQTT_TOPIC, reply, (uint16_t)replyLen);
+
+      if(mqttSocket != nullptr)
+      {
+        mqttSocket->sendData(rxMsg.payload, rxMsg.payloadLen, false);
+      }
+    }
   }
 }
 
