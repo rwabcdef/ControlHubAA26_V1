@@ -40,3 +40,22 @@ SPI5
   PF6: GPIO_Output - nRF24L01 CE (for controlling Rx/Tx operation)
   PF5: GPIO_EXTI5 - nRF24L01 nINT
 #--------------------------------------------------------------------
+## MQTT
+
+#1) Norton 360
+
+# when windows machine is the MQTT broker
+Norton 360 -> Security -> Advanced -> Smart Firewall
+
+More -> Create rule
+
+  Name: Mosquitto MQTT 1883 STM32
+  Action: allow
+  Protocol: TCP
+  Direction: In
+  Address: 192.168.0.200
+  Local port: 1883
+  remote port: 1883
+
+#2) Make sure ethernet cable is in NUCLEO-F439ZI
+#--------------------------------------------------------------------
