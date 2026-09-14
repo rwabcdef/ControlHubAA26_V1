@@ -34,6 +34,8 @@
 #include "nRF24L01.hpp"
 #include "spi5.h"
 #include "Radio.hpp"
+#include "MqttPublisher.hpp"
+#include "lwip/netif.h"
 
 //--------------------------------------------------------------
 /* Definitions for writer0Task */
@@ -116,6 +118,14 @@ const osThreadAttr_t radio1Task_attributes = {
   .priority = (osPriority_t) osPriorityNormal,
 };
 
+/* Definitions for mqttTask */
+osThreadId_t mqttTaskHandle;
+const osThreadAttr_t mqttTask_attributes = {
+  .name = "mqttTask",
+  .stack_size = 512 * 4,
+  .priority = (osPriority_t) osPriorityNormal,
+};
+
 //--------------------------------------------------------------
 void startWriter0Task(void *argument);
 void startReader0Task(void *argument);
@@ -127,6 +137,7 @@ void startWriter1Task(void *argument);
 void startReader1Task(void *argument);
 void startSerLink1Task(void *argument);
 void startRadio1Task(void *argument);
+void startMqttTask(void *argument);
 
 bool debugSockInstantHandler(SerLink::Frame &rxFrame, uint16_t* dataLen, char* data);
 
@@ -236,6 +247,9 @@ void initTasks()
 
    /* creation of ledTask */
   ledTaskHandle = osThreadNew(StartLedTask, NULL, &ledTask_attributes);
+
+  /* creation of mqttTask */
+  mqttTaskHandle = osThreadNew(startMqttTask, NULL, &mqttTask_attributes);
 
   // The nRF24L01 has one owner at a time - SerLink1 through radio1, or one of
   // the raw test tasks - since the driver is not thread-safe. Select with
@@ -359,6 +373,57 @@ void StartLedTask(void *argument)
     vTaskDelayUntil(&xLastWakeTime, xFrequency);
   }
   /* USER CODE END StartLedTask */
+}
+
+//--------------------------------------------------------------
+// MQTT publish
+//
+// Every MQTT_PUBLISH_PERIOD_MS publishes "msg stm32: <n>" to MQTT_TOPIC, n
+// counting up from 0. While not connected it retries the connection once per
+// period instead, so the broker can start after the board, or restart.
+#define MQTT_BROKER_IP          "192.168.0.196"
+#define MQTT_BROKER_PORT        1883
+#define MQTT_CLIENT_ID          "stm32-controlhub"   // must be unique on the broker
+#define MQTT_TOPIC              "test/hello"
+#define MQTT_PUBLISH_PERIOD_MS  3000
+
+extern struct netif gnetif;   // lwip.c
+
+// The constructor only stores its arguments, so a global is safe here - the
+// lwIP client itself is allocated on the first connect().
+MqttPublisher mqtt(MQTT_BROKER_IP, MQTT_BROKER_PORT, MQTT_CLIENT_ID);
+
+void startMqttTask(void *argument)
+{
+  uint32_t count = 0;
+  char     msg[32];
+
+  /* initTasks() runs before StartDefaultTask() calls MX_LWIP_Init(), which
+     creates the tcpip core lock every MqttPublisher method takes. The netif
+     is only brought up after that, so it is the signal that lwIP is ready.
+     Waiting for the link as well saves a connect that could only time out. */
+  while(!netif_is_up(&gnetif) || !netif_is_link_up(&gnetif))
+  {
+    osDelay(500);
+  }
+
+  for(;;)
+  {
+    if(mqtt.isConnected())
+    {
+      int msgLen = snprintf(msg, sizeof(msg), "msg stm32: %lu", (unsigned long)count);
+
+      mqtt.publish(MQTT_TOPIC, msg, (uint16_t)msgLen);
+      count++;
+    }
+    else
+    {
+      // Returns false, harmlessly, while an earlier attempt is still pending
+      mqtt.connect();
+    }
+
+    osDelay(MQTT_PUBLISH_PERIOD_MS);
+  }
 }
 
 

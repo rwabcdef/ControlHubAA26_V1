@@ -123,6 +123,7 @@
 									<listOptionValue builtIn="false" value="../HAL/spi5"/>
 									<listOptionValue builtIn="false" value="../Components/nRF24L01"/>
 									<listOptionValue builtIn="false" value="../Components/Radio"/>
+									<listOptionValue builtIn="false" value="../Components/Mqtt"/>
 									<listOptionValue builtIn="false" value="../Components/Button"/>
 									<listOptionValue builtIn="false" value="../Components/Led"/>
 									<listOptionValue builtIn="false" value="../Components/PWM"/>
@@ -200,13 +201,13 @@
 						</toolChain>
 					</folderInfo>
 					<sourceEntries>
+						<entry flags="VALUE_WORKSPACE_PATH|RESOLVED" kind="sourcePath" name="Components"/>
+						<entry flags="VALUE_WORKSPACE_PATH|RESOLVED" kind="sourcePath" name="HAL"/>
 						<entry flags="VALUE_WORKSPACE_PATH|RESOLVED" kind="sourcePath" name="Core"/>
 						<entry flags="VALUE_WORKSPACE_PATH|RESOLVED" kind="sourcePath" name="FATFS"/>
 						<entry flags="VALUE_WORKSPACE_PATH|RESOLVED" kind="sourcePath" name="Middlewares"/>
 						<entry flags="VALUE_WORKSPACE_PATH|RESOLVED" kind="sourcePath" name="LWIP"/>
 						<entry flags="VALUE_WORKSPACE_PATH|RESOLVED" kind="sourcePath" name="Drivers"/>
-						<entry flags="VALUE_WORKSPACE_PATH|RESOLVED" kind="sourcePath" name="HAL"/>
-						<entry flags="VALUE_WORKSPACE_PATH|RESOLVED" kind="sourcePath" name="Components"/>
 					</sourceEntries>
 				</configuration>
 			</storageModule>
@@ -330,6 +331,7 @@
 									<listOptionValue builtIn="false" value="../HAL/spi5"/>
 									<listOptionValue builtIn="false" value="../Components/nRF24L01"/>
 									<listOptionValue builtIn="false" value="../Components/Radio"/>
+									<listOptionValue builtIn="false" value="../Components/Mqtt"/>
 									<listOptionValue builtIn="false" value="../Components/Button"/>
 									<listOptionValue builtIn="false" value="../Components/Led"/>
 									<listOptionValue builtIn="false" value="../Components/PWM"/>
@@ -406,13 +408,13 @@
 						</toolChain>
 					</folderInfo>
 					<sourceEntries>
+						<entry flags="VALUE_WORKSPACE_PATH|RESOLVED" kind="sourcePath" name="Components"/>
+						<entry flags="VALUE_WORKSPACE_PATH|RESOLVED" kind="sourcePath" name="HAL"/>
 						<entry flags="VALUE_WORKSPACE_PATH|RESOLVED" kind="sourcePath" name="Core"/>
 						<entry flags="VALUE_WORKSPACE_PATH|RESOLVED" kind="sourcePath" name="FATFS"/>
 						<entry flags="VALUE_WORKSPACE_PATH|RESOLVED" kind="sourcePath" name="Middlewares"/>
 						<entry flags="VALUE_WORKSPACE_PATH|RESOLVED" kind="sourcePath" name="LWIP"/>
 						<entry flags="VALUE_WORKSPACE_PATH|RESOLVED" kind="sourcePath" name="Drivers"/>
-						<entry flags="VALUE_WORKSPACE_PATH|RESOLVED" kind="sourcePath" name="HAL"/>
-						<entry flags="VALUE_WORKSPACE_PATH|RESOLVED" kind="sourcePath" name="Components"/>
 					</sourceEntries>
 				</configuration>
 			</storageModule>

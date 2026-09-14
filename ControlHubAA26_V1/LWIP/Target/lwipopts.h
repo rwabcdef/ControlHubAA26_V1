@@ -125,6 +125,13 @@
    Core/Inc instead (a .h, so it is not also compiled standalone). */
 #define HTTPD_FSDATA_FILE "fsdata_custom.h"
 
+/* MQTT client (Components/Mqtt). lwIP sizes the timeout pool for its own
+   modules only - here TCP, IP reassembly and ARP, which fill it exactly. A
+   connected MQTT client holds one more (its cyclic keep-alive timer); without
+   the spare slot that timer never starts, no PINGREQ is ever sent, and the
+   broker drops the connection after 1.5x the keep-alive. */
+#define MEMP_NUM_SYS_TIMEOUT (LWIP_NUM_SYS_TIMEOUT_INTERNAL + 1)
+
 /* USER CODE END 1 */
 
 #ifdef __cplusplus

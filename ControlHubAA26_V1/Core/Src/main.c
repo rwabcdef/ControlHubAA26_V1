@@ -21,6 +21,7 @@
 #include "cmsis_os.h"
 #include "fatfs.h"
 #include "lwip.h"
+
 /* Private includes ----------------------------------------------------------*/
 /* USER CODE BEGIN Includes */
 #include "app_main.h"
@@ -140,7 +141,6 @@ int main(void)
   MX_TIM8_Init();
   MX_USART2_UART_Init();
   MX_FATFS_Init();
-  
   /* USER CODE BEGIN 2 */
 
   uart2_init();
