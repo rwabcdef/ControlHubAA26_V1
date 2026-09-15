@@ -10,6 +10,7 @@ Socket::Socket()
   this->transport = nullptr;
   this->txRollCode = 0;
   this->receiveCallback = nullptr;
+  this->relay = nullptr;
 }
 
 void Socket::init(char* protocol, Transport* transport, onReceiveCallback receiveCallback)
@@ -47,6 +48,29 @@ bool Socket::sendData(char* data, uint16_t dataLen, bool ack)
   Frame::incRollCode(&this->txRollCode);
 
   return this->transport->sendFrame(&frame);
+}
+
+bool Socket::sendFrame(Frame* frame)
+{
+  if(this->transport == nullptr)
+  {
+    return false; // not acquired
+  }
+
+  Frame txFrame = *frame;
+  txFrame.setProtocol(this->protocol);
+
+  return this->transport->sendFrame(&txFrame);
+}
+
+void Socket::setRelay(SerlinkRelay* relay)
+{
+  this->relay = relay;
+}
+
+SerlinkRelay* Socket::getRelay()
+{
+  return this->relay;
 }
 
 bool Socket::receiveData(uint16_t* dataLen, char* data, uint16_t timeoutMs)

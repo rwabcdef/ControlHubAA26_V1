@@ -1,6 +1,7 @@
 #include "Transport.hpp"
 #include "Writer.hpp"
 #include "Reader.hpp"
+#include "SerlinkRelay.hpp"
 
 using namespace SerLink;
 
@@ -30,8 +31,17 @@ void Transport::run()
       {
         if(this->sockets[i].isAcquired() && this->sockets[i].matchesProtocol(frameMsg.frame.protocol))
         {
-          // The corresp[onding socket has been found - deliver the received data to it.
-          this->sockets[i].deliverReceivedData(frameMsg.frame.data, frameMsg.frame.dataLen);
+          SerlinkRelay* relay = this->sockets[i].getRelay();
+          if(relay != nullptr)
+          {
+            // The socket is relayed - hand the whole frame to the relay.
+            relay->relayFrame(&this->sockets[i], &frameMsg.frame, SerlinkRelayMsg::TYPE_RX);
+          }
+          else
+          {
+            // The corresp[onding socket has been found - deliver the received data to it.
+            this->sockets[i].deliverReceivedData(frameMsg.frame.data, frameMsg.frame.dataLen);
+          }
           break;
         }
       }
@@ -52,16 +62,23 @@ void Transport::run()
     {
       // Ack packets can (typically don't) contain data - via the piggyback mechanism.
       // If this is the case then the data is delivered to the socket that matches the protocol of the ack frame.
-      if(frameMsg.frame.dataLen <= Frame::MAX_DATALEN)
+      for(uint8_t i = 0; i < SERLINK_CONFIG__MAX_SOCKETS; i++)
       {
-        for(uint8_t i = 0; i < SERLINK_CONFIG__MAX_SOCKETS; i++)
+        if(this->sockets[i].isAcquired() && this->sockets[i].matchesProtocol(frameMsg.frame.protocol))
         {
-          if(this->sockets[i].isAcquired() && this->sockets[i].matchesProtocol(frameMsg.frame.protocol))
+          SerlinkRelay* relay = this->sockets[i].getRelay();
+          if(relay != nullptr)
+          {
+            // The socket is relayed - the relay needs every ack (including a
+            // plain ACK_OK), to send its relay ack.
+            relay->relayFrame(&this->sockets[i], &frameMsg.frame, SerlinkRelayMsg::TYPE_ACK);
+          }
+          else if(frameMsg.frame.dataLen <= Frame::MAX_DATALEN)
           {
             // The corresp[onding socket has been found - deliver the received data to it.
             this->sockets[i].deliverReceivedData(frameMsg.frame.data, frameMsg.frame.dataLen);
-            break;
           }
+          break;
         }
       }
 

@@ -12,6 +12,7 @@ namespace SerLink {
   // Only used as a pointer here - forward declared (rather than #included)
   // to avoid a Transport.hpp <-> Socket.hpp circular include.
   class Transport;
+  class SerlinkRelay;
 
   class Socket {
     protected:
@@ -35,10 +36,22 @@ namespace SerLink {
 
       onReceiveCallback receiveCallback;
 
+      // Set by SerlinkRelay::registerPair() (see setRelay()).
+      SerlinkRelay* relay;
+
     public:
       Socket();
       void init(char* protocol, Transport* transport, onReceiveCallback = nullptr);
       bool sendData(char* data, uint16_t dataLen, bool ack);
+
+      // Sends a copy of frame: its type, roll code, data length & data are
+      // kept, the protocol is set to this socket's. Non-blocking, as sendData().
+      bool sendFrame(Frame* frame);
+
+      // While a relay is set, Transport hands this socket's received frames
+      // and acks to the relay (see SerlinkRelay) instead of delivering them.
+      void setRelay(SerlinkRelay* relay);
+      SerlinkRelay* getRelay();
       bool receiveData(uint16_t* dataLen, char* data, uint16_t timeoutMs);
 
       // Called (by Transport, once it identifies this socket's protocol as

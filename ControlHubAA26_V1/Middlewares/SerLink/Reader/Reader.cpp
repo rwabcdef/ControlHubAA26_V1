@@ -97,8 +97,10 @@ uint8_t Reader::idle()
       this->ackDelayStartTick = xTaskGetTickCount();
       return ACKDELAY;
     }
-    else if(this->rxFrame.type == Frame::TYPE_UNIDIRECTION)
+    else if((this->rxFrame.type == Frame::TYPE_UNIDIRECTION) ||
+            (this->rxFrame.type == Frame::TYPE_RELAY_ACK))
     {
+      // No ack is sent for a unidirectional frame (or a relay ack)
       // pass the received frame to the consumer queue if it exists
       if(this->consumerQueue != nullptr)
       {

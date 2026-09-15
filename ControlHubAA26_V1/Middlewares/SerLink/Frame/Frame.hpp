@@ -18,6 +18,7 @@ public:
   static const char TYPE_TRANSMISSION = 'T';
   static const char TYPE_UNIDIRECTION = 'U';
   static const char TYPE_ACK = 'A';
+  static const char TYPE_RELAY_ACK = 'B';
   static const int LEN_PROTOCOL = 5;
   static const int LEN_TYPE = 1;
   static const int LEN_ROLLCODE = 3;

@@ -110,6 +110,7 @@
 									<listOptionValue builtIn="false" value="../Middlewares/SerLink/Socket"/>
 									<listOptionValue builtIn="false" value="../Middlewares/SerLink/StateMachine"/>
 									<listOptionValue builtIn="false" value="../Middlewares/SerLink/Writer"/>
+									<listOptionValue builtIn="false" value="../Middlewares/SerLink/Relay"/>
 									<listOptionValue builtIn="false" value="../FATFS/Target"/>
 									<listOptionValue builtIn="false" value="../FATFS/App"/>
 									<listOptionValue builtIn="false" value="../Middlewares/Third_Party/FatFs/src"/>
@@ -129,6 +130,9 @@
 									<listOptionValue builtIn="false" value="../Components/PWM"/>
 									<listOptionValue builtIn="false" value="../Components/Motor/L293D"/>
 									<listOptionValue builtIn="false" value="../Components/Motor/TC78H611FNG"/>
+									<listOptionValue builtIn="false" value="../Components/Adapters/LinkInterface"/>
+									<listOptionValue builtIn="false" value="../Components/Adapters/Uart"/>
+									<listOptionValue builtIn="false" value="../Components/Adapters/Radio"/>
 									<listOptionValue builtIn="false" value="../Core/Inc"/>
 									<listOptionValue builtIn="false" value="../LWIP/App"/>
 									<listOptionValue builtIn="false" value="../LWIP/Target"/>
@@ -163,6 +167,7 @@
 									<listOptionValue builtIn="false" value="../Middlewares/SerLink/Socket"/>
 									<listOptionValue builtIn="false" value="../Middlewares/SerLink/StateMachine"/>
 									<listOptionValue builtIn="false" value="../Middlewares/SerLink/Writer"/>
+									<listOptionValue builtIn="false" value="../Middlewares/SerLink/Relay"/>
 									<listOptionValue builtIn="false" value="../FATFS/Target"/>
 									<listOptionValue builtIn="false" value="../FATFS/App"/>
 									<listOptionValue builtIn="false" value="../Middlewares/Third_Party/FatFs/src"/>
@@ -318,6 +323,7 @@
 									<listOptionValue builtIn="false" value="../Middlewares/SerLink/Socket"/>
 									<listOptionValue builtIn="false" value="../Middlewares/SerLink/StateMachine"/>
 									<listOptionValue builtIn="false" value="../Middlewares/SerLink/Writer"/>
+									<listOptionValue builtIn="false" value="../Middlewares/SerLink/Relay"/>
 									<listOptionValue builtIn="false" value="../FATFS/Target"/>
 									<listOptionValue builtIn="false" value="../FATFS/App"/>
 									<listOptionValue builtIn="false" value="../Middlewares/Third_Party/FatFs/src"/>
@@ -337,6 +343,9 @@
 									<listOptionValue builtIn="false" value="../Components/PWM"/>
 									<listOptionValue builtIn="false" value="../Components/Motor/L293D"/>
 									<listOptionValue builtIn="false" value="../Components/Motor/TC78H611FNG"/>
+									<listOptionValue builtIn="false" value="../Components/Adapters/LinkInterface"/>
+									<listOptionValue builtIn="false" value="../Components/Adapters/Uart"/>
+									<listOptionValue builtIn="false" value="../Components/Adapters/Radio"/>
 									<listOptionValue builtIn="false" value="../Core/Inc"/>
 									<listOptionValue builtIn="false" value="../LWIP/App"/>
 									<listOptionValue builtIn="false" value="../LWIP/Target"/>
@@ -371,6 +380,7 @@
 									<listOptionValue builtIn="false" value="../Middlewares/SerLink/Socket"/>
 									<listOptionValue builtIn="false" value="../Middlewares/SerLink/StateMachine"/>
 									<listOptionValue builtIn="false" value="../Middlewares/SerLink/Writer"/>
+									<listOptionValue builtIn="false" value="../Middlewares/SerLink/Relay"/>
 									<listOptionValue builtIn="false" value="../FATFS/Target"/>
 									<listOptionValue builtIn="false" value="../FATFS/App"/>
 									<listOptionValue builtIn="false" value="../Middlewares/Third_Party/FatFs/src"/>

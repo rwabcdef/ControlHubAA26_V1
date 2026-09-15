@@ -132,8 +132,9 @@ uint8_t Writer::idle()
 
     this->uartWrite((char*)this->txBuffer); // blocking - done by the time this returns
 
-    if(this->txFrame.type == Frame::TYPE_UNIDIRECTION)
+    if(this->txFrame.type != Frame::TYPE_TRANSMISSION)
     {
+      // No ack expected (e.g. 'U' or 'B' frame)
       this->status = Writer::STATUS_IDLE;
       return IDLE;
     }
