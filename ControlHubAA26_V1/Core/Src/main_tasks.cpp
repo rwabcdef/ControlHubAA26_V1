@@ -349,7 +349,7 @@ void initTasks()
   radio1.startListening();
 
   writer1.init([](char* buffer) -> uint8_t {
-    return RadioMsg::queueTxData(radio1.eventQueue, buffer);
+    return radio1.write(buffer);
   });
   reader1.init(radio1.rxDataQueue, &writer1, transport1.queue, radio1.eventQueue);
 
