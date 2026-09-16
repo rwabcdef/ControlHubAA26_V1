@@ -213,6 +213,11 @@ SerLink::Transport transport1(&writer1, &reader1);
 Radio radio1(nRF24L01_CE_GPIO_Port, nRF24L01_CE_Pin,
              nRF24L01_SS_GPIO_Port, nRF24L01_SS_Pin);
 
+// A TX_DATA RadioMsg has to hold the longest string Frame::toString() writes,
+// NUL included - writer1 and reader1 both send serialised frames that way.
+static_assert(RADIOMSG__FRAME_LEN_MAX >= SerLink::Frame::MAX_FRAME_LEN,
+  "RADIOMSG__FRAME_LEN_MAX is too small for a serialised SerLink frame");
+
 //--------------------------------------------------------------
 // LED01 relay (ledRelay): ledSerialSocket (transport0, uart2) <-> ledRadioSocket
 // (transport1, radio1), in both directions - as the serlink_nrf24_brg sketch.
@@ -301,7 +306,7 @@ void initTasks()
   radioSocket = transport0.acquireSocket("RAD00");
   ledSerialSocket = transport0.acquireSocket("LED01");
 
-  writer0.init();
+  writer0.init(uart2_writeBlocking);
   reader0.init(uart2Queue, &writer0, transport0.queue);
 
   writer0TaskHandle = osThreadNew(startWriter0Task, NULL, &writer0Task_attributes);
@@ -343,7 +348,9 @@ void initTasks()
   // needs the radio listening between transmissions or no ack ever arrives.
   radio1.startListening();
 
-  writer1.init(radio1.eventQueue);
+  writer1.init([](char* buffer) -> uint8_t {
+    return RadioMsg::queueTxData(radio1.eventQueue, buffer);
+  });
   reader1.init(radio1.rxDataQueue, &writer1, transport1.queue, radio1.eventQueue);
 
   writer1TaskHandle = osThreadNew(startWriter1Task, NULL, &writer1Task_attributes);

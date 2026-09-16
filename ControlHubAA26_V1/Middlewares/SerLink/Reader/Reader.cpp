@@ -20,10 +20,10 @@ Reader::Reader(uint8_t id): id(id)
 }
 
 void Reader::init(QueueHandle_t uartRxQueue, Writer* writer, QueueHandle_t consumerQueue,
-  QueueHandle_t extTxOutQueue)
+  QueueHandle_t ackTxQueue)
 {
   this->uartRxQueue = uartRxQueue;
-  this->extTxOutQueue = extTxOutQueue;
+  this->ackTxQueue = ackTxQueue;
   this->writer = writer;
   this->consumerQueue = consumerQueue;
   this->numInstantHandlers = 0;
@@ -161,9 +161,9 @@ uint8_t Reader::uartWrite(char* buffer)
 {
   // Checked before the id mapping, so an instance with an external queue can
   // never also write to a uart.
-  if(this->extTxOutQueue != nullptr)
+  if(this->ackTxQueue != nullptr)
   {
-    return RadioMsg::queueTxData(this->extTxOutQueue, buffer);
+    return RadioMsg::queueTxData(this->ackTxQueue, buffer);
   }
 
 #ifdef READER_CONFIG__READER0

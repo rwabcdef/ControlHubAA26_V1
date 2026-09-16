@@ -6,7 +6,6 @@
  */
 
 #include "Writer.hpp"
-#include "uart2.h"
 #include <string.h>
 #include <stdio.h>
 
@@ -17,19 +16,13 @@
 
 using namespace SerLink;
 
-// A TX_DATA RadioMsg has to hold the longest string Frame::toString() writes,
-// NUL included.
-static_assert(RADIOMSG__FRAME_LEN_MAX >= Frame::MAX_FRAME_LEN,
-  "RADIOMSG__FRAME_LEN_MAX is too small for a serialised SerLink frame");
-
-Writer::Writer(uint8_t id): id(id), extTxOutQueue(nullptr)
+Writer::Writer(uint8_t id): id(id), writeData(nullptr)
 {
 }
 
-void Writer::init(QueueHandle_t extTxOutQueue)
+void Writer::init(const WriteDataFunc writeData)
 {
-  this->id = id;
-  this->extTxOutQueue = extTxOutQueue;
+  this->writeData = writeData;
   this->currentState = IDLE;
   this->status = Writer::STATUS_IDLE;
 
@@ -130,7 +123,10 @@ uint8_t Writer::idle()
     uint8_t ret;
     this->txFrame.toString((char*)this->txBuffer, &ret);
 
-    this->uartWrite((char*)this->txBuffer); // blocking - done by the time this returns
+    if(this->writeData != nullptr)
+    {
+      this->writeData((char*)this->txBuffer);
+    }
 
     if(this->txFrame.type != Frame::TYPE_TRANSMISSION)
     {
@@ -170,23 +166,3 @@ uint8_t Writer::ackWait()
 }
 // end of state methods
 //----------------------------------------------------------------
-
-uint8_t Writer::uartWrite(char* buffer)
-{
-  // Checked before the id mapping, so an instance with an external queue can
-  // never also write to a uart.
-  if(this->extTxOutQueue != nullptr)
-  {
-    return RadioMsg::queueTxData(this->extTxOutQueue, buffer);
-  }
-
-#ifdef WRITER_CONFIG__WRITER0
-
-  if(this->id == WRITER_CONFIG__WRITER0_ID)
-  {
-    return uart2_writeBlocking(buffer);
-  }
-
-#endif
-  return 1;
-}

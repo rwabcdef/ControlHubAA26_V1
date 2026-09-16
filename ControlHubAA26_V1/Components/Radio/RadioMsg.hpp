@@ -1,8 +1,9 @@
 /*
  * RadioMsg.hpp
  *
- * Item type for Radio::eventQueue, and so also for the extTxOutQueue a
- * SerLink Writer or Reader posts serialised frames onto.
+ * Item type for Radio::eventQueue, and so also for the queue a SerLink
+ * Writer (via its writeData function) or Reader (ackTxQueue) posts
+ * serialised frames onto.
  */
 
 #ifndef RADIOMSG_HPP_

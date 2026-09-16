@@ -22,7 +22,7 @@
 //----------------------------------------------------------
 
 //----------------------------------------------------------
-// READER1 - SerLink1, over the radio. It sends acks to the extTxOutQueue
+// READER1 - SerLink1, over the radio. It sends acks to the ackTxQueue
 // passed to init() rather than a uart, so it has no READER_CONFIG__READER1
 // switch.
 #define READER_CONFIG__READER1_ID 2 // READER1 instance id

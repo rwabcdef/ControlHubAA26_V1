@@ -14,11 +14,15 @@
  #include "Frame.hpp"
  #include "FreeRTOS.h"
  #include "queue.h"
- #include "RadioMsg.hpp"
 
 
  namespace SerLink
  {
+ // Writes buffer, a NUL-terminated serialised frame, to the link a Writer
+ // sends over. Returns 0 on success. e.g. uart2_writeBlocking, or a function
+ // (or captureless lambda) posting to Radio::eventQueue via RadioMsg::queueTxData.
+ typedef uint8_t (*WriteDataFunc)(char* buffer);
+
  class Writer : public StateMachine
  {
  private:
@@ -45,10 +49,8 @@
    uint8_t ackQueueStorageArea[ACK_QUEUE_LENGTH * sizeof(Frame)];
    QueueHandle_t ackQueue;
 
-   // Set by init(). When non-null, uartWrite() posts each serialised frame
-   // here as a RadioMsg TX_DATA (e.g. to Radio::eventQueue) instead of
-   // writing it to a uart.
-   QueueHandle_t extTxOutQueue;
+   // Set by init(). Every serialised frame is sent with this.
+   WriteDataFunc writeData;
 
    uint8_t idle();
    uint8_t ackWait();
@@ -62,9 +64,8 @@
    static const uint8_t STATUS_PROTOCOL_ERROR = 52;
 
    Writer(uint8_t id);
-   // extTxOutQueue: leave null to write to the uart chosen by id; set it to
-   // send frames through another link instead (see uartWrite()).
-   void init(QueueHandle_t extTxOutQueue = nullptr);
+   // writeData: sends each serialised frame over the link (see WriteDataFunc).
+   void init(const WriteDataFunc writeData);
    void run();
 
    // Used to send frame. Non-blocking: returns 1 (rather than blocking the
@@ -81,8 +82,6 @@
    // Called by a Reader to pass an ack frame to the Writer. Non-blocking:
    // the ack is silently dropped if ackQueue is full.
    void setAckFrame(Frame* frame);
-
-   uint8_t uartWrite(char* buffer);
  };
 
  } // end namespace SerLink

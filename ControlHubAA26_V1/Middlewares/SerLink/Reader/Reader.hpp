@@ -59,7 +59,7 @@
      QueueHandle_t consumerQueue = nullptr; // Queue for passing received frames up to the consumer
 
      // When set, acks go here as RadioMsg TX_DATA instead being sent by uart2_writeBlocking().
-     QueueHandle_t extTxOutQueue = nullptr; 
+     QueueHandle_t ackTxQueue = nullptr;
 
     //  char* rxBuffer;
     //  char* ackBuffer;
@@ -107,7 +107,7 @@
     //      Frame* rxFrame, Frame* ackFrame, Writer* writer = nullptr); // , DebugPrint* debugPrint = nullptr
     Reader(uint8_t id); // , DebugPrint* debugPrint = nullptr
    void init(QueueHandle_t uartRxQueue, Writer* writer = nullptr,
-    QueueHandle_t consumerQueue = nullptr, QueueHandle_t extTxOutQueue = nullptr);
+    QueueHandle_t consumerQueue = nullptr, QueueHandle_t ackTxQueue = nullptr);
      void run();
      bool registerInstantCallback(char* protocol, readHandler handler);
      bool getRxFrame(Frame* rxFrame);
