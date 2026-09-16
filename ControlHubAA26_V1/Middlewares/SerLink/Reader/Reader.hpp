@@ -55,8 +55,12 @@
     //  bool rxFlag;
      Writer* writer = nullptr;
      QueueHandle_t uartRxQueue = nullptr; // Queue for receiving messages from the UART layer
-     QueueHandle_t consumerQueue = nullptr; // Queue for passing received frames to the consumer
-     QueueHandle_t extTxOutQueue = nullptr; // When set, acks go here as RadioMsg TX_DATA instead of to a uart
+
+     QueueHandle_t consumerQueue = nullptr; // Queue for passing received frames up to the consumer
+
+     // When set, acks go here as RadioMsg TX_DATA instead being sent by uart2_writeBlocking().
+     QueueHandle_t extTxOutQueue = nullptr; 
+
     //  char* rxBuffer;
     //  char* ackBuffer;
     //  uint8_t bufferLen;

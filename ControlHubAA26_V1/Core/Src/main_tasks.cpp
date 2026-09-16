@@ -15,6 +15,12 @@
 
  DBG00T349002R2      # will produce ack with data "OK" (from: debugSockInstantHandler())
 
+LED01U492002A1
+LED01U492002A0
+
+LED01T492002A1
+LED01T492002A0
+
  */
 
 #include <cstdio>
@@ -24,8 +30,10 @@
 #include "cmsis_os.h"
 #include "main_tasks.h"
 #include "queue.h"
+#include "Frame.hpp"
 #include "Reader.hpp"
 #include "Transport.hpp"
+#include "SerlinkRelay.hpp"
 #include "uart2.h"
 #include "Button.hpp"
 #include "Led.hpp"
@@ -134,6 +142,14 @@ const osThreadAttr_t mqttRxTask_attributes = {
   .priority = (osPriority_t) osPriorityNormal,
 };
 
+/* Definitions for relayTask */
+osThreadId_t relayTaskHandle;
+const osThreadAttr_t relayTask_attributes = {
+  .name = "relayTask",
+  .stack_size = 512 * 4,
+  .priority = (osPriority_t) osPriorityNormal,
+};
+
 //--------------------------------------------------------------
 void startWriter0Task(void *argument);
 void startReader0Task(void *argument);
@@ -147,6 +163,7 @@ void startSerLink1Task(void *argument);
 void startRadio1Task(void *argument);
 void startMqttTask(void *argument);
 void startMqttRxTask(void *argument);
+void startRelayTask(void *argument);
 
 bool debugSockInstantHandler(SerLink::Frame &rxFrame, uint16_t* dataLen, char* data);
 
@@ -177,6 +194,8 @@ QueueHandle_t transport0Queue;
 
 SerLink::Transport transport0(&writer0, &reader0);
 
+SerLink::Socket* ledSerialSocket = nullptr;
+
 //--------------------------------------------------------------
 // SerLink1 - the same stack again, over the nRF24L01 (radio1) instead of
 // uart2. writer1 and reader1 post serialised frames to radio1.eventQueue,
@@ -193,6 +212,22 @@ SerLink::Transport transport1(&writer1, &reader1);
 
 Radio radio1(nRF24L01_CE_GPIO_Port, nRF24L01_CE_Pin,
              nRF24L01_SS_GPIO_Port, nRF24L01_SS_Pin);
+
+//--------------------------------------------------------------
+// LED01 relay (ledRelay): ledSerialSocket (transport0, uart2) <-> ledRadioSocket
+// (transport1, radio1), in both directions - as the serlink_nrf24_brg sketch.
+// Relayed frames keep their roll code, e.g.
+//   PC -> LED01U492002A1          (uart2)
+//   radio -> LED01U492002A1
+//
+// For a 'T' frame, the far end's ack is returned as a relay ack ('B'), e.g.
+//   PC -> LED01T492002A1          (uart2)
+//   PC <- LED01A492900            (ack from reader0)
+//   radio -> LED01T492002A1
+//   radio <- LED01A492900         (ack from the far end)
+//   PC <- LED01B492900            (relay ack)
+SerLink::Socket* ledRadioSocket = nullptr;
+SerLink::SerlinkRelay ledRelay;
 
 //--------------------------------------------------------------
 // Board LEDs (GPIOB)
@@ -264,6 +299,7 @@ void initTasks()
   transport0.init(transport0Queue, transport0ReceiveCallback, transport0AckCallback);
 
   radioSocket = transport0.acquireSocket("RAD00");
+  ledSerialSocket = transport0.acquireSocket("LED01");
 
   writer0.init();
   reader0.init(uart2Queue, &writer0, transport0.queue);
@@ -294,8 +330,14 @@ void initTasks()
     transport1QueueStorageArea, &transport1StaticQueue);
   transport1.init(transport1Queue);
 
+  // Registered before the scheduler starts, so the Transport tasks never see
+  // either LED01 socket unrelayed.
+  ledRadioSocket = transport1.acquireSocket("LED01");
+  ledRelay.init();
+  ledRelay.registerPair(ledSerialSocket, ledRadioSocket);
+
   // Before writer1/reader1: init() creates the queues they are handed.
-  radio1.init();
+  radio1.init((const uint8_t*)"00001");
 
   // Queued now, applied once radio1Task has brought the device up. SerLink
   // needs the radio listening between transmissions or no ack ever arrives.
@@ -311,6 +353,9 @@ void initTasks()
   serLink1TaskHandle = osThreadNew(startSerLink1Task, NULL, &serLink1Task_attributes);
 
   radio1TaskHandle = osThreadNew(startRadio1Task, NULL, &radio1Task_attributes);
+
+  relayTaskHandle = osThreadNew(startRelayTask, NULL, &relayTask_attributes);
+
 #elif RADIO_TEST_TX
   radioTxTaskHandle = osThreadNew(startRadioTxTask, NULL, &radioTxTask_attributes);
 #else
@@ -347,11 +392,22 @@ void startSerLink0Task(void *argument)
   /* USER CODE BEGIN startSerLink0Task */
   SerLink::Socket* debugSocket = transport0.acquireSocket("DBG00", nullptr, debugSockInstantHandler);
 
+
+
   for(;;)
   {
     transport0.run();
   }
   /* USER CODE END startSerLink0Task */
+}
+
+// Owns ledRelay: all relaying happens here (see SerlinkRelay.hpp).
+void startRelayTask(void *argument)
+{
+  for(;;)
+  {
+    ledRelay.run();
+  }
 }
 
 //--------------------------------------------------------------

@@ -73,6 +73,28 @@ void HAL_UART_RxCpltCallback(UART_HandleTypeDef *huart)
     }
 }
 
+// called by HAL_UART_IRQHandler on a receive error, i.e., called in the interrupt
+//
+// Without this, an overrun stops uart2 receiving for good: HAL treats ORE as
+// blocking, ends the Rx transfer (disabling RXNE) and leaves re-arming to the
+// user - so every later frame would be silently lost. Framing, noise and
+// parity errors are non-blocking (Rx carries on), but the frame being
+// assembled is still corrupt.
+void HAL_UART_ErrorCallback(UART_HandleTypeDef *huart)
+{
+    if (huart->Instance == USART2)
+    {
+        // bytes were lost or corrupted - discard the partial frame
+        rxLen = 0;
+
+        // Only after a blocking error: Rx is still armed after a non-blocking one
+        if (huart->RxState == HAL_UART_STATE_READY)
+        {
+            HAL_UART_Receive_IT(&huart2, (uint8_t *)&rx_byte, 1); // re-arm interrupt
+        }
+    }
+}
+
 void uart2_init(void)
 {
     /* The peripheral, its clock and the PD5/PD6 pins are already set up by

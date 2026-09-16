@@ -81,15 +81,8 @@ uint8_t Reader::idle()
 			  }
       }
 
-      // pass the received frame to the consumer queue if it exists
-      if(this->consumerQueue != nullptr)
-      {
-        // copy the received frame into the rxFrameMsg and send it to the consumer queue
-        this->rxFrame.copy(&this->rxFrameMsg.frame);
-        this->rxFrameMsg.type = FrameMsg::TYPE_RX;
-
-        xQueueSend(this->consumerQueue, &this->rxFrameMsg, 0);
-      }
+      // The received frame is passed to the consumer queue by txAck(), once
+      // the ack has been sent - see txAck().
 
       // capture the exact point of transition - ackDelay() waits an
       // absolute ACK_DELAY_MS measured from here, not from whenever it
@@ -144,6 +137,19 @@ uint8_t Reader::txAck()
   // send the ack frame
   this->ackFrame.toString(this->ackBuffer, nullptr);
   this->uartWrite(this->ackBuffer);
+
+  // Only now pass the received 'T' frame to the consumer queue (as the Arduino
+  // Reader does), so the ack always precedes anything the consumer sends in
+  // response - e.g. a SerlinkRelay relaying the frame, whose relay ack ('B')
+  // would otherwise beat this ack if the far end acks within ACK_DELAY_MS.
+  // rxFrame is unchanged since idle(): no frame is read in ACKDELAY / TXACK.
+  if(this->consumerQueue != nullptr)
+  {
+    this->rxFrame.copy(&this->rxFrameMsg.frame);
+    this->rxFrameMsg.type = FrameMsg::TYPE_RX;
+
+    xQueueSend(this->consumerQueue, &this->rxFrameMsg, 0);
+  }
 
   return IDLE;
 }
