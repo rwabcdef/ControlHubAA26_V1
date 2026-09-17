@@ -11,3 +11,7 @@ file: ControlHubAA26_V1\Middlewares\SerLink\Socket\Socket.cpp
 BP at line 98 is firing, but not at 82,
 which should be due to line 382
 in: ControlHubAA26_V1\Core\Src\main_tasks.cpp
+
+
+...
+Review, comment and implement.

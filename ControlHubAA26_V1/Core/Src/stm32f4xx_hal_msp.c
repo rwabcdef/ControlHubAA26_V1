@@ -410,6 +410,33 @@ void HAL_TIM_PWM_MspInit(TIM_HandleTypeDef* htim_pwm)
     HAL_NVIC_EnableIRQ(TIM8_BRK_TIM12_IRQn);
     /* USER CODE BEGIN TIM8_MspInit 1 */
 
+    /* PA6 is TIM8_BKIN and MX_TIM8_Init() arms the break with
+       BreakState  = TIM_BREAK_ENABLE
+       BreakPolarity = TIM_BREAKPOLARITY_HIGH
+       AutomaticOutput = TIM_AUTOMATICOUTPUT_DISABLE
+       so a high on PA6 clears BDTR.MOE and latches every TIM8 output off
+       until software sets MOE again. CubeMX configures the pin
+       GPIO_NOPULL, i.e. floating, and a floating input drifts - which
+       would silently kill the motor PWM on PC6/PC7 with no way back
+       short of a reset.
+
+       Re-apply the same alternate function with an internal pull-down,
+       so the break stays inactive unless something actively drives PA6
+       high. Nothing on the TC78H611FNG does - the part has no fault
+       output - so the break is only useful if an external e-stop is
+       wired to PA6 (ZIO D12) later.
+
+       This lives here rather than in MX_TIM8_Init() because PWM::init()
+       runs HAL_TIM_PWM_Init() a second time against its own handle
+       (PWM.cpp owns the prescaler/period it needs), which calls this
+       function again and would otherwise put PA6 back to NOPULL. */
+    GPIO_InitStruct.Pin = GPIO_PIN_6;
+    GPIO_InitStruct.Mode = GPIO_MODE_AF_PP;
+    GPIO_InitStruct.Pull = GPIO_PULLDOWN;
+    GPIO_InitStruct.Speed = GPIO_SPEED_FREQ_LOW;
+    GPIO_InitStruct.Alternate = GPIO_AF3_TIM8;
+    HAL_GPIO_Init(GPIOA, &GPIO_InitStruct);
+
     /* USER CODE END TIM8_MspInit 1 */
   }
 

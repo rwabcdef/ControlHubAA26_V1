@@ -12,12 +12,18 @@ static const PwmPinMapping pwmPinMappings[] =
   { GPIOD, GPIO_PIN_14, TIM4, TIM_CHANNEL_3, GPIO_AF2_TIM4 },
   { GPIOD, GPIO_PIN_15, TIM4, TIM_CHANNEL_4, GPIO_AF2_TIM4 },
   { GPIOC, GPIO_PIN_6,  TIM8, TIM_CHANNEL_1, GPIO_AF3_TIM8 },
-  { GPIOC, GPIO_PIN_8,  TIM8, TIM_CHANNEL_3, GPIO_AF3_TIM8 },
-  { GPIOC, GPIO_PIN_9,  TIM8, TIM_CHANNEL_4, GPIO_AF3_TIM8 },
-  // TIM8_CH2 would be PC7, but this board uses PC7 as I2S3_MCK for the
-  // CS43L22 audio codec (MX_I2S3_Init). Adding it here would let a PWM
-  // instance silently reconfigure that pin to AF3 and kill the codec
-  // clock, so CH2 is deliberately left unmapped.
+  { GPIOC, GPIO_PIN_7,  TIM8, TIM_CHANNEL_2, GPIO_AF3_TIM8 },
+  // TIM8_CH3/CH4 would be PC8/PC9, but on this board those are SDIO_D0
+  // and SDIO_D1 (MX_SDIO_SD_Init, SD 4-bit wide bus). A PWM instance on
+  // either would silently reconfigure the pin to AF3 and take the SD
+  // card down, so CH3 and CH4 are deliberately left unmapped.
+  //
+  // TIM8 note: unlike TIM4 it is an advanced-control timer, so its
+  // outputs are gated by BDTR.MOE as well as the CCER enables.
+  // HAL_TIM_PWM_Start() sets MOE, but MX_TIM8_Init() also enables the
+  // break input on PA6 - see the note in HAL_TIM_PWM_MspInit() in
+  // stm32f4xx_hal_msp.c, which is what keeps a break from latching every
+  // TIM8 channel off.
 };
 
 const PwmPinMapping* PWM::findMapping(GPIO_TypeDef* port, uint16_t pin)

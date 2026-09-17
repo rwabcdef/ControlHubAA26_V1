@@ -39,6 +39,7 @@ LED01T492002A0
 #include "Led.hpp"
 #include "PWM.hpp"
 #include "TC78H611FNG.hpp"
+#include "TC78H611FNG_Standby.hpp"
 #include "nRF24L01.hpp"
 #include "spi5.h"
 #include "Radio.hpp"
@@ -150,6 +151,16 @@ const osThreadAttr_t relayTask_attributes = {
   .priority = (osPriority_t) osPriorityNormal,
 };
 
+/* Definitions for motorTestTask */
+// One shot, and it only touches motor0, so configMINIMAL_STACK_SIZE is
+// ample - the same 128 words ledTask runs in.
+osThreadId_t motorTestTaskHandle;
+const osThreadAttr_t motorTestTask_attributes = {
+  .name = "motorTestTask",
+  .stack_size = 128 * 4,
+  .priority = (osPriority_t) osPriorityNormal,
+};
+
 //--------------------------------------------------------------
 void startWriter0Task(void *argument);
 void startReader0Task(void *argument);
@@ -164,6 +175,7 @@ void startRadio1Task(void *argument);
 void startMqttTask(void *argument);
 void startMqttRxTask(void *argument);
 void startRelayTask(void *argument);
+void startMotorTestTask(void *argument);
 
 bool debugSockInstantHandler(SerLink::Frame &rxFrame, uint16_t* dataLen, char* data);
 
@@ -239,6 +251,51 @@ SerLink::SerlinkRelay ledRelay;
 Led ledBoardGreen(GPIOB, GPIO_PIN_0);
 
 //--------------------------------------------------------------
+// Motor drive - channel B of a TC78H611FNG dual H-bridge, on TIM8.
+// Board pins are CN12 (ST morpho, UM1974 Table 21); J10 is the 2x5
+// header on the driver board:
+//
+//   PC6  TIM8_CH1   CN12 pin 4   -> J10 pin 10 -> IN1B   (outA)
+//   PC7  TIM8_CH2   CN12 pin 19  -> J10 pin 8  -> IN2B   (outB)
+//   PB8  GPIO out   CN12 pin 3   -> J10 pin 6  -> /STBY
+//   PA6  TIM8_BKIN  CN12 pin 13  -> break input, see stm32f4xx_hal_msp.c
+//
+// CN12 pin 20 is GND, opposite PC7, for the ground link to J10.
+//
+// TC78H611FNG takes (IN1, IN2) whichever bridge it drives, so outA is
+// IN1B and outB is IN2B here. Per the datasheet's Input/Output table
+// that puts the PWM on IN2B (PC7) for forward and IN1B (PC6) for
+// reverse.
+//
+// Both IN pins are PWM channels rather than one PWM and one GPIO, which
+// is what TC78H611FNG.hpp asks for - see the comment there. That is why
+// PC7 had to be added to pwmPinMappings[] in PWM.cpp.
+//
+// /STBY is device-wide, so this same TC78H611FNG_Standby also covers
+// channel A (IN1A/IN2A, J10 pins 4 and 2) if a second TC78H611FNG is
+// added for it later.
+//
+// PB8 is ZIO D15 on CN7, next to PC6 (D16). It is not claimed in the
+// .ioc at all, so CubeMX never touches it and TC78H611FNG_Standby
+// configures it itself - but for the same reason nothing stops a future
+// CubeMX edit handing PB8 to a peripheral, so claim it there if this
+// becomes permanent.
+//
+// 1 kHz is well inside the TC78H611FNG's 500 kHz input rating and above
+// the audible whine of the slower options. Note that TIM8's period is
+// shared, so this also sets the frequency of any other PWM channel on
+// TIM8 - PWM::setFrequency() has the details.
+#define MOTOR0_PWM_FREQ       PWM_FREQ_1KHZ
+#define MOTOR0_START_PERCENT  20
+#define MOTOR_TEST_DELAY_MS   2000
+
+TC78H611FNG_Standby motor0Standby(GPIOB, GPIO_PIN_8);
+
+TC78H611FNG motor0(GPIOC, GPIO_PIN_6,   // IN1B, TIM8_CH1
+                   GPIOC, GPIO_PIN_7,   // IN2B, TIM8_CH2
+                   MOTOR0_PWM_FREQ);
+
+//--------------------------------------------------------------
 // nRF24L01 radio on SPI5. The driver owns CE (PF6) and CSN (PF10); spi5
 // itself handles only SCK/MISO/MOSI, so the bus stays free for other slaves.
 // These three must agree with the transmitter. The values below are the
@@ -305,6 +362,24 @@ void initTasks()
 
   radioSocket = transport0.acquireSocket("RAD00");
   ledSerialSocket = transport0.acquireSocket("LED01");
+
+  // Motor drive. setPercent() is what brings the hardware up: PWM
+  // configures its timer and GPIO on first use, so this is where PC6/PC7
+  // stop being inputs and TIM8 starts running.
+  //
+  // The direction is still idle, so applyOutputs() drives both channels
+  // to 0% - IN1B and IN2B both low, which the datasheet's Input/Output
+  // table calls Stop (outputs high impedance). The 10% is stored and
+  // takes effect on the first setDirection(); nothing turns until then.
+  //
+  // enable() comes last, so /STBY only goes high with both IN pins
+  // already parked low - the state the datasheet asks for across a
+  // standby transition. Call motor0Standby.disable() to coast the
+  // bridge without disturbing the PWM settings.
+  motor0.setPercent(MOTOR0_START_PERCENT);
+  motor0Standby.enable();
+
+  motorTestTaskHandle = osThreadNew(startMotorTestTask, NULL, &motorTestTask_attributes);
 
   writer0.init(uart2_writeBlocking);
   reader0.init(uart2Queue, &writer0, transport0.queue);
@@ -471,6 +546,34 @@ void StartLedTask(void *argument)
     vTaskDelayUntil(&xLastWakeTime, xFrequency);
   }
   /* USER CODE END StartLedTask */
+}
+
+//--------------------------------------------------------------
+// Motor test
+//
+// One shot: lets the board settle for MOTOR_TEST_DELAY_MS, then runs
+// motor0 forward at MOTOR0_START_PERCENT and exits.
+//
+// setDirection() is what actually starts the motor. initTasks() has
+// already stored the percent and taken the driver out of standby, but it
+// leaves the direction at idle - both IN pins low, which the datasheet
+// calls Stop - so nothing turns until this runs.
+//
+// forward puts the PWM on IN2B (PC7) and holds IN1B (PC6) low. Swap to
+// TC78H611FNG::reverse to drive the other way, or TC78H611FNG::idle to
+// coast.
+void startMotorTestTask(void *argument)
+{
+  osDelay(MOTOR_TEST_DELAY_MS);
+
+  motor0.setPercent(MOTOR0_START_PERCENT);
+  motor0.setDirection(TC78H611FNG::reverse);
+
+  /* Nothing further to do. INCLUDE_vTaskDelete is on, so give the stack
+     back rather than parking the task in an empty loop for ever. The
+     motor keeps running: the PWM is generated by TIM8 in hardware and
+     does not need this task alive to hold it up. */
+  osThreadTerminate(osThreadGetId());
 }
 
 //--------------------------------------------------------------
