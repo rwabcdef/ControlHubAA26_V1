@@ -31,6 +31,8 @@ TXD	-> PD6 (USART2_RX) - orange        Pin 4
 RXD	-> PD5 (USART2_TX) - yellow        Pin 6
 GND	-> GND on STM32 board - black      Pin 12
 
+seems to come up as COM5
+
 ## nRF24L01
 SPI5
   PF7: SPI5_SCK
@@ -58,4 +60,13 @@ More -> Create rule
   remote port: 1883
 
 #2) Make sure ethernet cable is in NUCLEO-F439ZI
+#--------------------------------------------------------------------
+## Motor (with TC78H611FNG and TC78H611FNG_Standby)
+
+TC78H611FNG IC is on ControlHubAA26 Peripheral Board A
+
+PC6: TIM8_CH1 - CN12 pin4  -> IN1B (J10 pin 10)
+PC7: TIM8_CH2 - CN12 pin19 -> IN2B (J10 pin 8)
+PB8: GPIO     - CN12 pin3  -> nSTBY (J10 pin 6)
+
 #--------------------------------------------------------------------

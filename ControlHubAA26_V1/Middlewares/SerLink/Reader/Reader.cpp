@@ -17,6 +17,21 @@ using namespace SerLink;
 Reader::Reader(uint8_t id): id(id)
 {
   this->currentState = IDLE;
+
+  /* The instant handler table is set up here rather than in init(),
+     because registration does not have to wait for init(): Transport
+     registers a handler from acquireSocket(), and a caller that acquires
+     a socket before init()ing the reader is doing nothing wrong. Zeroing
+     it in init() instead silently discarded those registrations, leaving
+     the socket working for sends while every instant read fell back to a
+     plain ACK_OK.
+
+     Zeroing the whole table, not just the count, also keeps
+     getInstantHandler() honest - it scans all MAX_NUM_INSTANT_HANDLERS
+     entries rather than stopping at numInstantHandlers, so the unused
+     ones have to hold a protocol that cannot match. */
+  this->numInstantHandlers = 0;
+  memset(this->handlerRegistrations, 0, sizeof(this->handlerRegistrations));
 }
 
 void Reader::init(QueueHandle_t uartRxQueue, Writer* writer, QueueHandle_t consumerQueue,
@@ -26,7 +41,9 @@ void Reader::init(QueueHandle_t uartRxQueue, Writer* writer, QueueHandle_t consu
   this->ackTxQueue = ackTxQueue;
   this->writer = writer;
   this->consumerQueue = consumerQueue;
-  this->numInstantHandlers = 0;
+
+  // numInstantHandlers is deliberately NOT reset here - see the
+  // constructor. Handlers may already be registered by this point.
 }
 
 void Reader::run()

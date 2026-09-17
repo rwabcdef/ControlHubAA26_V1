@@ -15,11 +15,16 @@
 
  DBG00T349002R2      # will produce ack with data "OK" (from: debugSockInstantHandler())
 
+ # led socket - relayed to the radio, and ultimatelty to the remote hub (arduino uno r4)
 LED01U492002A1
 LED01U492002A0
 
 LED01T492002A1
 LED01T492002A0
+
+# Motor socket - the TC78H611FNG dual H-bridge on TIM8, channel B (IN1B/IN2B on J10 pins 10 and 8)
+MOTORT516005BP050
+MOTORT516005BP010
 
  */
 
@@ -151,12 +156,12 @@ const osThreadAttr_t relayTask_attributes = {
   .priority = (osPriority_t) osPriorityNormal,
 };
 
-/* Definitions for motorTestTask */
-// One shot, and it only touches motor0, so configMINIMAL_STACK_SIZE is
+/* Definitions for motorTask */
+// One shot, and it only touches motorB, so configMINIMAL_STACK_SIZE is
 // ample - the same 128 words ledTask runs in.
-osThreadId_t motorTestTaskHandle;
-const osThreadAttr_t motorTestTask_attributes = {
-  .name = "motorTestTask",
+osThreadId_t motorTaskHandle;
+const osThreadAttr_t motorTask_attributes = {
+  .name = "motorTask",
   .stack_size = 128 * 4,
   .priority = (osPriority_t) osPriorityNormal,
 };
@@ -175,9 +180,14 @@ void startRadio1Task(void *argument);
 void startMqttTask(void *argument);
 void startMqttRxTask(void *argument);
 void startRelayTask(void *argument);
-void startMotorTestTask(void *argument);
+void startMotorTask(void *argument);
 
 bool debugSockInstantHandler(SerLink::Frame &rxFrame, uint16_t* dataLen, char* data);
+
+// MOTOR socket handlers - the command set is documented above their
+// implementations, below startMotorTask().
+void motorSockReceiveHandler(const char* data, uint16_t dataLen);
+bool motorSockInstantHandler(SerLink::Frame &rxFrame, uint16_t* dataLen, char* data);
 
 // This is called by transport0 when a frame is received.
 void transport0ReceiveCallback(const char* data, uint16_t dataLen){ 
@@ -285,15 +295,19 @@ Led ledBoardGreen(GPIOB, GPIO_PIN_0);
 // the audible whine of the slower options. Note that TIM8's period is
 // shared, so this also sets the frequency of any other PWM channel on
 // TIM8 - PWM::setFrequency() has the details.
-#define MOTOR0_PWM_FREQ       PWM_FREQ_1KHZ
-#define MOTOR0_START_PERCENT  20
-#define MOTOR_TEST_DELAY_MS   2000
+#define MOTORB_PWM_FREQ       PWM_FREQ_1KHZ
+#define MOTORB_START_PERCENT  20
+#define MOTOR_START_DELAY_MS   2000
 
-TC78H611FNG_Standby motor0Standby(GPIOB, GPIO_PIN_8);
+TC78H611FNG_Standby motorStandby(GPIOB, GPIO_PIN_8);
 
-TC78H611FNG motor0(GPIOC, GPIO_PIN_6,   // IN1B, TIM8_CH1
+TC78H611FNG motorB(GPIOC, GPIO_PIN_6,   // IN1B, TIM8_CH1
                    GPIOC, GPIO_PIN_7,   // IN2B, TIM8_CH2
-                   MOTOR0_PWM_FREQ);
+                   MOTORB_PWM_FREQ);
+
+// Acquired on transport0 (uart2), so motor commands arrive over the
+// serial link rather than the radio.
+SerLink::Socket* motorSocket = nullptr;
 
 //--------------------------------------------------------------
 // nRF24L01 radio on SPI5. The driver owns CE (PF6) and CSN (PF10); spi5
@@ -369,20 +383,36 @@ void initTasks()
   //
   // The direction is still idle, so applyOutputs() drives both channels
   // to 0% - IN1B and IN2B both low, which the datasheet's Input/Output
-  // table calls Stop (outputs high impedance). The 10% is stored and
-  // takes effect on the first setDirection(); nothing turns until then.
+  // table calls Stop (outputs high impedance). MOTORB_START_PERCENT is
+  // stored and takes effect on the first setDirection(); nothing turns
+  // until then.
   //
   // enable() comes last, so /STBY only goes high with both IN pins
   // already parked low - the state the datasheet asks for across a
-  // standby transition. Call motor0Standby.disable() to coast the
+  // standby transition. Call motorStandby.disable() to coast the
   // bridge without disturbing the PWM settings.
-  motor0.setPercent(MOTOR0_START_PERCENT);
-  motor0Standby.enable();
+  motorB.setPercent(MOTORB_START_PERCENT);
+  motorStandby.enable();
 
-  motorTestTaskHandle = osThreadNew(startMotorTestTask, NULL, &motorTestTask_attributes);
+  motorTaskHandle = osThreadNew(startMotorTask, NULL, &motorTask_attributes);
 
   writer0.init(uart2_writeBlocking);
   reader0.init(uart2Queue, &writer0, transport0.queue);
+
+  /* Sets are handled by motorSockReceiveHandler (in serLink0Task), reads
+     by motorSockInstantHandler (in reader0Task, so the answer rides back
+     on the ack).
+
+     Order against reader0.init() no longer matters - Reader sets its
+     instant handler table up in its constructor - but this stays next to
+     the reader/writer setup it depends on. Still before the scheduler
+     starts, so no task can see the socket half-registered.
+
+     Note this is the fifth and last socket transport0 can hold -
+     SERLINK_CONFIG__MAX_SOCKETS is 5, and DBG00 and MQTT0 are acquired
+     later by their own tasks. A sixth would get a silent nullptr. */
+  motorSocket = transport0.acquireSocket("MOTOR", motorSockReceiveHandler,
+    motorSockInstantHandler);
 
   writer0TaskHandle = osThreadNew(startWriter0Task, NULL, &writer0Task_attributes);
 
@@ -549,31 +579,231 @@ void StartLedTask(void *argument)
 }
 
 //--------------------------------------------------------------
-// Motor test
+// Motor task
 //
-// One shot: lets the board settle for MOTOR_TEST_DELAY_MS, then runs
-// motor0 forward at MOTOR0_START_PERCENT and exits.
+// One shot: lets the board settle for MOTOR_START_DELAY_MS, then starts
+// motorB at MOTORB_START_PERCENT and exits. This is the bring-up kick -
+// once it has run, the MOTOR socket drives everything from here (see
+// motorSockReceiveHandler below).
 //
 // setDirection() is what actually starts the motor. initTasks() has
 // already stored the percent and taken the driver out of standby, but it
 // leaves the direction at idle - both IN pins low, which the datasheet
 // calls Stop - so nothing turns until this runs.
 //
-// forward puts the PWM on IN2B (PC7) and holds IN1B (PC6) low. Swap to
-// TC78H611FNG::reverse to drive the other way, or TC78H611FNG::idle to
-// coast.
-void startMotorTestTask(void *argument)
+// reverse puts the PWM on IN1B (PC6) and holds IN2B (PC7) low; forward
+// is the other way round, and idle coasts.
+void startMotorTask(void *argument)
 {
-  osDelay(MOTOR_TEST_DELAY_MS);
+  osDelay(MOTOR_START_DELAY_MS);
 
-  motor0.setPercent(MOTOR0_START_PERCENT);
-  motor0.setDirection(TC78H611FNG::reverse);
+  motorB.setPercent(MOTORB_START_PERCENT);
+  motorB.setDirection(TC78H611FNG::reverse);
 
   /* Nothing further to do. INCLUDE_vTaskDelete is on, so give the stack
      back rather than parking the task in an empty loop for ever. The
      motor keeps running: the PWM is generated by TIM8 in hardware and
      does not need this task alive to hold it up. */
   osThreadTerminate(osThreadGetId());
+}
+
+//--------------------------------------------------------------
+// MOTOR socket - motor control over SerLink0 (uart2).
+//
+// Frame data is <selector><command><args>, on top of SerLink's usual
+// 12 character header (5 protocol, 1 type, 3 roll code, 3 data length):
+//
+//   Sets. Handled by motorSockReceiveHandler(), acked with a plain
+//   ACK_OK - the ack says the frame arrived, not that the motor moved:
+//
+//     MOTORT516005AP030    percent = 30%   (always 3 digits, zero padded)
+//     MOTORT523003ADF      direction = forward
+//     MOTORT523003ADR      direction = reverse
+//     MOTORT523003ADD      direction = disabled
+//
+//   Reads. Handled by motorSockInstantHandler(), which piggybacks the
+//   answer onto the ack instead of sending a frame of its own:
+//
+//     MOTORT529003AGP  ->  MOTORA529003030    percent,   3 digits
+//     MOTORT529003AGF  ->  MOTORA5290041000   frequency, 4 digits (Hz)
+//     MOTORT529003AGD  ->  MOTORA529001F      direction, one of F/R/D
+//
+// <selector> is the TC78H611FNG bridge channel. Only channel B is wired
+// (IN1B/IN2B on J10 pins 10 and 8), so for now 'A' and 'B' both reach
+// motorB - see motorForSelector().
+//
+// 'D' for disabled means direction idle: both IN pins low, which the
+// datasheet's Input/Output table calls Stop, so the motor coasts. It
+// deliberately does not drop /STBY, because /STBY is device-wide and
+// would take channel A down with it once that exists.
+
+// Selector + command. Everything past this is command specific.
+#define MOTOR_CMD_MIN_LEN   2U
+#define MOTOR_CMD_SET_PERCENT_LEN  5U   // <sel>P<ddd>
+#define MOTOR_CMD_DIRECTION_LEN    3U   // <sel>D<F|R|D> and <sel>G<P|F|D>
+
+// Only channel B of the TC78H611FNG is built, so both selectors resolve
+// to motorB. When channel A is wired, give it its own TC78H611FNG on
+// IN1A/IN2A (J10 pins 4 and 2) and return that for 'A'.
+static TC78H611FNG* motorForSelector(char selector)
+{
+  switch(selector)
+  {
+    case 'A':   // -> &motorA once channel A hardware exists
+    case 'B':
+      return &motorB;
+
+    default:
+      return nullptr;
+  }
+}
+
+static bool motorDirectionFromChar(char value, TC78H611FNG::direction* direction)
+{
+  switch(value)
+  {
+    case 'F': *direction = TC78H611FNG::forward; return true;
+    case 'R': *direction = TC78H611FNG::reverse; return true;
+    case 'D': *direction = TC78H611FNG::idle;    return true;
+    default:  return false;
+  }
+}
+
+static char motorDirectionToChar(TC78H611FNG::direction direction)
+{
+  switch(direction)
+  {
+    case TC78H611FNG::forward: return 'F';
+    case TC78H611FNG::reverse: return 'R';
+    default:                   return 'D';   // idle - reported as disabled
+  }
+}
+
+/* Frame::int3dToStr() does this job, but only at three digits wide, and
+   the frequency read needs four. Frame::str3dToInt() is no use for the
+   inbound direction either: it maps any non-digit silently onto 0, so
+   "APxyz" would be read as 0% rather than rejected. */
+static void motorWriteUint(uint32_t value, uint8_t width, char* dst)
+{
+  for(uint8_t i = width; i > 0U; i--)
+  {
+    dst[i - 1U] = (char)('0' + (value % 10U));
+    value /= 10U;
+  }
+}
+
+static bool motorReadUint(const char* src, uint8_t width, uint32_t* value)
+{
+  uint32_t result = 0U;
+
+  for(uint8_t i = 0U; i < width; i++)
+  {
+    if((src[i] < '0') || (src[i] > '9'))
+    {
+      return false;
+    }
+    result = (result * 10U) + (uint32_t)(src[i] - '0');
+  }
+
+  *value = result;
+  return true;
+}
+
+// The sets. Runs in serLink0Task, from Transport::run(), which for a 'T'
+// frame is after the ack has already gone out - so a malformed command is
+// dropped silently rather than reported. Use the reads to confirm what
+// actually landed.
+void motorSockReceiveHandler(const char* data, uint16_t dataLen)
+{
+  if(dataLen < MOTOR_CMD_MIN_LEN)
+  {
+    return;
+  }
+
+  TC78H611FNG* motor = motorForSelector(data[0]);
+  if(motor == nullptr)
+  {
+    return;
+  }
+
+  switch(data[1])
+  {
+    case 'P':   // <sel>P<ddd> - set percent
+    {
+      uint32_t percent;
+
+      if((dataLen == MOTOR_CMD_SET_PERCENT_LEN) &&
+         motorReadUint(&data[2], 3U, &percent))
+      {
+        // No range check needed: setPercent() clamps above 100 itself,
+        // and three digits cannot exceed 999.
+        motor->setPercent((uint8_t)percent);
+      }
+      break;
+    }
+
+    case 'D':   // <sel>D<F|R|D> - set direction
+    {
+      TC78H611FNG::direction direction;
+
+      if((dataLen == MOTOR_CMD_DIRECTION_LEN) &&
+         motorDirectionFromChar(data[2], &direction))
+      {
+        motor->setDirection(direction);
+      }
+      break;
+    }
+
+    case 'G':   // reads are answered on the ack, in motorSockInstantHandler()
+    default:
+      break;
+  }
+}
+
+// The reads. Runs in reader0Task, before the ack is sent, so what it
+// writes here rides back on that ack.
+//
+// The handler is registered per protocol, so it sees the sets too.
+// Returning false for those leaves the ack as a plain ACK_OK, which is
+// exactly what they want.
+//
+// This only calls getters while motorSockReceiveHandler() does all the
+// writing from another task. No lock is needed: each getter reads a
+// single byte or word, which the M4 loads atomically, so a read can be
+// stale by one command but never torn.
+bool motorSockInstantHandler(SerLink::Frame &rxFrame, uint16_t* dataLen, char* data)
+{
+  if((rxFrame.dataLen != MOTOR_CMD_DIRECTION_LEN) || (rxFrame.data[1] != 'G'))
+  {
+    return false;   // not a read - leave the ack alone
+  }
+
+  TC78H611FNG* motor = motorForSelector(rxFrame.data[0]);
+  if(motor == nullptr)
+  {
+    return false;
+  }
+
+  switch(rxFrame.data[2])
+  {
+    case 'P':   // percent, 3 digits - same format the set takes
+      motorWriteUint(motor->getPercent(), 3U, data);
+      *dataLen = 3U;
+      return true;
+
+    case 'F':   // frequency in Hz, 4 digits - pwmFreqValues spans 100..2000
+      motorWriteUint((uint32_t)motor->getFrequency(), 4U, data);
+      *dataLen = 4U;
+      return true;
+
+    case 'D':   // direction, one of F/R/D
+      data[0] = motorDirectionToChar(motor->getDirection());
+      *dataLen = 1U;
+      return true;
+
+    default:
+      return false;
+  }
 }
 
 //--------------------------------------------------------------
