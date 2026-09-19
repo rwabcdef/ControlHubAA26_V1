@@ -26,6 +26,11 @@ LED01T492002A0
 MOTORT516005BP050
 MOTORT516005BP010
 
+# Adc socket - ADC1, ranks IN0/IN3/IN4/IN5 (PA0/PA3/PA4/PA5). Channel 1 is the motorB current sense.
+ADC00T529002G1      # raw count, 4 digits
+ADC00T529002V1      # millivolts, 4 digits
+ADC00T529002GA      # all four channels, raw
+
  */
 
 #include <cstdio>
@@ -45,6 +50,7 @@ MOTORT516005BP010
 #include "PWM.hpp"
 #include "TC78H611FNG.hpp"
 #include "TC78H611FNG_Standby.hpp"
+#include "Adc.hpp"
 #include "nRF24L01.hpp"
 #include "spi5.h"
 #include "Radio.hpp"
@@ -156,6 +162,16 @@ const osThreadAttr_t relayTask_attributes = {
   .priority = (osPriority_t) osPriorityNormal,
 };
 
+/* Definitions for adcTask */
+// Supervision only - the sampling itself is timer, DMA and interrupt, so
+// this task just wakes twice a second to check it is still running.
+osThreadId_t adcTaskHandle;
+const osThreadAttr_t adcTask_attributes = {
+  .name = "adcTask",
+  .stack_size = 128 * 4,
+  .priority = (osPriority_t) osPriorityNormal,
+};
+
 /* Definitions for motorTask */
 // One shot, and it only touches motorB, so configMINIMAL_STACK_SIZE is
 // ample - the same 128 words ledTask runs in.
@@ -181,6 +197,7 @@ void startMqttTask(void *argument);
 void startMqttRxTask(void *argument);
 void startRelayTask(void *argument);
 void startMotorTask(void *argument);
+void startAdcTask(void *argument);
 
 bool debugSockInstantHandler(SerLink::Frame &rxFrame, uint16_t* dataLen, char* data);
 
@@ -188,6 +205,9 @@ bool debugSockInstantHandler(SerLink::Frame &rxFrame, uint16_t* dataLen, char* d
 // implementations, below startMotorTask().
 void motorSockReceiveHandler(const char* data, uint16_t dataLen);
 bool motorSockInstantHandler(SerLink::Frame &rxFrame, uint16_t* dataLen, char* data);
+
+// ADC00 socket handler - reads only, documented above its implementation.
+bool adcSockInstantHandler(SerLink::Frame &rxFrame, uint16_t* dataLen, char* data);
 
 // This is called by transport0 when a frame is received.
 void transport0ReceiveCallback(const char* data, uint16_t dataLen){ 
@@ -310,6 +330,41 @@ TC78H611FNG motorB(GPIOC, GPIO_PIN_6,   // IN1B, TIM8_CH1
 SerLink::Socket* motorSocket = nullptr;
 
 //--------------------------------------------------------------
+// Analog inputs - ADC1, four ranks, scanned continuously into a circular
+// DMA buffer. See Adc.hpp for how the sampling is arranged.
+//
+// The rank order below has to match the sequence MX_ADC1_Init() builds.
+// Rank 1 is channel index 0 here, which is what the ADC00 socket takes:
+//
+//   index  rank  ADC channel  pin
+//   0      1     IN0          PA0
+//   1      2     IN3          PA3   motorB current sense
+//   2      3     IN4          PA4
+//   3      4     IN5          PA5
+//
+// PA3 carries the TC78H611FNG current sense through a 10k/0.47u RC on the
+// board (fc ~34 Hz), so the 1 kHz PWM chop is already filtered out and the
+// ADC sees the average. That filter settles in about 40 ms, which is fine
+// for monitoring but far too slow for protection - fast overcurrent trip
+// belongs on TIM8_BKIN (PA6), not here.
+//
+// TIM2 paces the scans at 320 Hz (84 MHz / 2625 / 100). Each half buffer is
+// 32 scans, so a set of averages is published every 100 ms - 10 Hz out of
+// 32x oversampling.
+#define ADC1_NUM_CHANNELS   4
+
+extern ADC_HandleTypeDef hadc1;   // main.c
+extern TIM_HandleTypeDef htim2;   // main.c, the 320 Hz TRGO source
+
+/* C++ does not mangle plain global variable names, so these link against
+   main.c's definitions without needing extern "C" - unlike a function. */
+
+Adc adc1(&hadc1, &htim2, ADC1_NUM_CHANNELS);
+
+// Acquired on transport0 (uart2), alongside the motor socket.
+SerLink::Socket* adcSocket = nullptr;
+
+//--------------------------------------------------------------
 // nRF24L01 radio on SPI5. The driver owns CE (PF6) and CSN (PF10); spi5
 // itself handles only SCK/MISO/MOSI, so the bus stays free for other slaves.
 // These three must agree with the transmitter. The values below are the
@@ -408,11 +463,27 @@ void initTasks()
      the reader/writer setup it depends on. Still before the scheduler
      starts, so no task can see the socket half-registered.
 
-     Note this is the fifth and last socket transport0 can hold -
-     SERLINK_CONFIG__MAX_SOCKETS is 5, and DBG00 and MQTT0 are acquired
-     later by their own tasks. A sixth would get a silent nullptr. */
+     With ADC00 below, transport0 now holds all six sockets
+     SERLINK_CONFIG__MAX_SOCKETS allows - RAD00, LED01, MOTOR and ADC00
+     here, DBG00 and MQTT0 later, from their own tasks. A seventh would
+     get a silent nullptr. */
   motorSocket = transport0.acquireSocket("MOTOR", motorSockReceiveHandler,
     motorSockInstantHandler);
+
+  /* Analog inputs. init() only builds the queue and registers adc1 for the
+     HAL callbacks; start() arms the DMA and starts TIM2, after which the
+     sampling free runs in hardware. Both happen here, before the scheduler,
+     so the first half buffer cannot complete while the socket table or the
+     supervising task is still half built.
+
+     Reads only, so there is no receive callback - the instant handler puts
+     the answer on the ack instead. */
+  adcSocket = transport0.acquireSocket("ADC00", nullptr, adcSockInstantHandler);
+
+  adc1.init();
+  adc1.start();
+
+  adcTaskHandle = osThreadNew(startAdcTask, NULL, &adcTask_attributes);
 
   writer0TaskHandle = osThreadNew(startWriter0Task, NULL, &writer0Task_attributes);
 
@@ -683,7 +754,7 @@ static char motorDirectionToChar(TC78H611FNG::direction direction)
    the frequency read needs four. Frame::str3dToInt() is no use for the
    inbound direction either: it maps any non-digit silently onto 0, so
    "APxyz" would be read as 0% rather than rejected. */
-static void motorWriteUint(uint32_t value, uint8_t width, char* dst)
+static void writeUintField(uint32_t value, uint8_t width, char* dst)
 {
   for(uint8_t i = width; i > 0U; i--)
   {
@@ -692,7 +763,7 @@ static void motorWriteUint(uint32_t value, uint8_t width, char* dst)
   }
 }
 
-static bool motorReadUint(const char* src, uint8_t width, uint32_t* value)
+static bool readUintField(const char* src, uint8_t width, uint32_t* value)
 {
   uint32_t result = 0U;
 
@@ -733,7 +804,7 @@ void motorSockReceiveHandler(const char* data, uint16_t dataLen)
       uint32_t percent;
 
       if((dataLen == MOTOR_CMD_SET_PERCENT_LEN) &&
-         motorReadUint(&data[2], 3U, &percent))
+         readUintField(&data[2], 3U, &percent))
       {
         // No range check needed: setPercent() clamps above 100 itself,
         // and three digits cannot exceed 999.
@@ -787,12 +858,12 @@ bool motorSockInstantHandler(SerLink::Frame &rxFrame, uint16_t* dataLen, char* d
   switch(rxFrame.data[2])
   {
     case 'P':   // percent, 3 digits - same format the set takes
-      motorWriteUint(motor->getPercent(), 3U, data);
+      writeUintField(motor->getPercent(), 3U, data);
       *dataLen = 3U;
       return true;
 
     case 'F':   // frequency in Hz, 4 digits - pwmFreqValues spans 100..2000
-      motorWriteUint((uint32_t)motor->getFrequency(), 4U, data);
+      writeUintField((uint32_t)motor->getFrequency(), 4U, data);
       *dataLen = 4U;
       return true;
 
@@ -804,6 +875,110 @@ bool motorSockInstantHandler(SerLink::Frame &rxFrame, uint16_t* dataLen, char* d
     default:
       return false;
   }
+}
+
+//--------------------------------------------------------------
+// Analog input supervision.
+//
+// Nothing here is in the sample path: TIM2 triggers the scans, the DMA
+// fills the buffer and the DMA interrupt averages each half and publishes
+// it. This task only calls run(), which blocks internally and restarts the
+// sampling if it ever stops - see the comment on Adc::run().
+void startAdcTask(void *argument)
+{
+  for(;;)
+  {
+    adc1.run();
+  }
+}
+
+//--------------------------------------------------------------
+// ADC00 socket - analog readings over SerLink0 (uart2).
+//
+// Reads only, so every command is handled by adcSockInstantHandler() and
+// the answer rides back on the ack. Frame data is <command><selector>, on
+// top of SerLink's usual 12 character header:
+//
+//   ADC00T529002G1  ->  ADC00A5290042047    raw count, 4 digits (0..4095)
+//   ADC00T529002V1  ->  ADC00A5290041650    millivolts, 4 digits
+//   ADC00T529002GA  ->  ADC00A529016<16>    all channels raw, 4 digits each
+//   ADC00T529001E   ->  ADC00A5290040000    overrun count, 4 digits
+//
+// <selector> is the channel index, 0 based, in the rank order the .ioc
+// builds - so '1' is rank 2, ADC1_IN3, the motorB current sense. 'A' reads
+// them all in one frame, which is the useful one from a terminal.
+//
+// Every value is an average of the last 32 scans, refreshed at 10 Hz. A
+// read returns the most recent set; it never waits for the next one.
+//
+// 'E' is the overrun count. It should stay at zero - see Adc::run() for
+// what a non-zero value means.
+
+// Command + selector, or a bare command for the status reads.
+#define ADC_CMD_READ_LEN     2U
+#define ADC_CMD_STATUS_LEN   1U
+#define ADC_FIELD_WIDTH      4U
+
+// Runs in reader0Task, before the ack goes out. Only calls getters, which
+// read one half-word each - atomic on this core, so a value can be one
+// publish stale but never torn. Same reasoning as motorSockInstantHandler().
+bool adcSockInstantHandler(SerLink::Frame &rxFrame, uint16_t* dataLen, char* data)
+{
+  if((rxFrame.dataLen == ADC_CMD_STATUS_LEN) && (rxFrame.data[0] == 'E'))
+  {
+    writeUintField(adc1.getOverrunCount(), ADC_FIELD_WIDTH, data);
+    *dataLen = ADC_FIELD_WIDTH;
+    return true;
+  }
+
+  if(rxFrame.dataLen != ADC_CMD_READ_LEN)
+  {
+    return false;   // not a read - leave the ack alone
+  }
+
+  const char command  = rxFrame.data[0];
+  const char selector = rxFrame.data[1];
+
+  if((command != 'G') && (command != 'V'))
+  {
+    return false;
+  }
+
+  if(selector == 'A')   // every channel, raw counts, in rank order
+  {
+    if(command != 'G')
+    {
+      return false;   // no millivolts variant - one field type per frame
+    }
+
+    const uint8_t numChannels = adc1.getNumChannels();
+
+    for(uint8_t ch = 0U; ch < numChannels; ch++)
+    {
+      writeUintField(adc1.getCount(ch), ADC_FIELD_WIDTH, &data[ch * ADC_FIELD_WIDTH]);
+    }
+
+    *dataLen = (uint16_t)(numChannels * ADC_FIELD_WIDTH);
+    return true;
+  }
+
+  if((selector < '0') || (selector > '9'))
+  {
+    return false;
+  }
+
+  const uint8_t channel = (uint8_t)(selector - '0');
+  if(channel >= adc1.getNumChannels())
+  {
+    return false;
+  }
+
+  writeUintField((command == 'G') ? adc1.getCount(channel)
+                                  : adc1.getMillivolts(channel),
+    ADC_FIELD_WIDTH, data);
+
+  *dataLen = ADC_FIELD_WIDTH;
+  return true;
 }
 
 //--------------------------------------------------------------
