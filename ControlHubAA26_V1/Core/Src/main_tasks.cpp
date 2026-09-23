@@ -31,6 +31,11 @@ ADC00T529002G1      # raw count, 4 digits
 ADC00T529002V1      # millivolts, 4 digits
 ADC00T529002GA      # all four channels, raw
 
+# Tacho socket - motorB speed in RPM, published unsolicited by controlBTask
+# every TACHO_PUBLISH_PERIOD_MS. Transmit only, so there is nothing to type -
+# this is what appears in the terminal:
+TACHOU001005R0432   # 432 RPM. 'U', so the board expects no ack back
+
  */
 
 #include <cstdio>
@@ -51,6 +56,7 @@ ADC00T529002GA      # all four channels, raw
 #include "TC78H611FNG.hpp"
 #include "TC78H611FNG_Standby.hpp"
 #include "Adc.hpp"
+#include "Tachometer.hpp"
 #include "nRF24L01.hpp"
 #include "spi5.h"
 #include "Radio.hpp"
@@ -182,6 +188,17 @@ const osThreadAttr_t motorTask_attributes = {
   .priority = (osPriority_t) osPriorityNormal,
 };
 
+/* Definitions for controlBTask */
+// Drains the tachometer queue and recomputes speed every
+// CONTROLB_PERIOD_MS. Given more stack than the other small tasks because
+// this is where the motorB control loop will go.
+osThreadId_t controlBTaskHandle;
+const osThreadAttr_t controlBTask_attributes = {
+  .name = "controlB",
+  .stack_size = 256 * 4,
+  .priority = (osPriority_t) osPriorityNormal,
+};
+
 //--------------------------------------------------------------
 void startWriter0Task(void *argument);
 void startReader0Task(void *argument);
@@ -198,6 +215,7 @@ void startMqttRxTask(void *argument);
 void startRelayTask(void *argument);
 void startMotorTask(void *argument);
 void startAdcTask(void *argument);
+void startControlBTask(void *argument);
 
 bool debugSockInstantHandler(SerLink::Frame &rxFrame, uint16_t* dataLen, char* data);
 
@@ -330,6 +348,62 @@ TC78H611FNG motorB(GPIOC, GPIO_PIN_6,   // IN1B, TIM8_CH1
 SerLink::Socket* motorSocket = nullptr;
 
 //--------------------------------------------------------------
+// motorB tachometer - a wheel carrying two magnets, read by a 3144 Hall
+// switch. See Tachometer.hpp for how a speed is got out of it.
+//
+// The 3144 is open collector and pulls low as a magnet passes; a
+// non-inverting level shifter brings the swing up to 3 V, comfortably
+// clear of the 1.8 V VIH of a 3.3 V input. The line idles high and each
+// magnet gives one falling edge, so two per revolution.
+//
+//   PF4  GPIO EXTI4 (falling)  CN12 pin 38  <- level shifter output
+//   GND                        CN12 pin 39  <- sensor return
+//
+// PF4 puts the sensor on the same morpho connector as the motor it
+// measures (PC6/PC7/PB8 on CN12 pins 4/19/3), with GND immediately next
+// to it. What actually picked it is the pin NUMBER: pin 4 means EXTI line
+// 4, and lines 0-4 have a vector each, so this shares nothing with the
+// radio nINT on EXTI5 or USER_Btn on EXTI13 - no demux, no pending bit
+// belonging to someone else.
+//
+// Like PB8, PF4 is not claimed in the .ioc, so CubeMX never touches it
+// and Tachometer::init() configures the pin and the NVIC at runtime. The
+// EXTI4_IRQHandler vector is hand written in stm32f4xx_it.c for the same
+// reason. Claim PF4 in the .ioc if this becomes permanent - and until
+// then nothing stops a future CubeMX edit handing it to a peripheral.
+//
+// TIM5 is the timebase: 32 bit, free running at Tachometer::TICK_HZ, with
+// no interrupt of its own - the edge ISR just reads CNT. It is otherwise
+// unused, and its being 32 bit is what keeps every interval a plain
+// unsigned subtraction. TIM2, the only other 32 bit timer, is already the
+// ADC trigger.
+#define TACHOB_PIN  GPIO_PIN_4
+
+// The controlB period. 20 Hz is quick enough for speed control and slow
+// enough that several revolutions land in one update at working speed,
+// which is where the averaging in Tachometer::update() earns its keep.
+#define CONTROLB_PERIOD_MS 50
+
+Tachometer tachoB(TIM5, GPIOF, TACHOB_PIN);
+
+// Speed goes out unsolicited rather than being polled: nothing on the PC
+// has to ask for it, and a terminal left open shows the motor spinning up
+// and slowing down on its own. Sent as 'U' (no ack) because a telemetry
+// frame that went missing is better dropped than retried - the next one is
+// only TACHO_PUBLISH_PERIOD_MS away, and waiting on an ack would stall the
+// control loop.
+#define TACHO_PUBLISH_PERIOD_MS 2000
+#define TACHO_RPM_FIELD_WIDTH   4U
+
+// controlBTask publishes on a whole number of its own passes rather than
+// keeping a second timebase, so the two periods have to divide.
+static_assert((TACHO_PUBLISH_PERIOD_MS % CONTROLB_PERIOD_MS) == 0,
+  "TACHO_PUBLISH_PERIOD_MS must be a whole number of controlB periods");
+
+// Acquired on transport0 (uart2), alongside the motor and ADC sockets.
+SerLink::Socket* tachoSocket = nullptr;
+
+//--------------------------------------------------------------
 // Analog inputs - ADC1, four ranks, scanned continuously into a circular
 // DMA buffer. See Adc.hpp for how the sampling is arranged.
 //
@@ -451,6 +525,23 @@ void initTasks()
 
   motorTaskHandle = osThreadNew(startMotorTask, NULL, &motorTask_attributes);
 
+  /* motorB tachometer. init() creates the timestamp queue and starts TIM5
+     before it enables the EXTI line, so the first edge always has
+     somewhere to go - which matters here because interrupts are already
+     on and the wheel may still be turning from a previous run.
+
+     Before controlBTask exists, so that task cannot reach update() while
+     the queue is still being built. */
+  tachoB.init();
+
+  /* Transmit only: no receive callback and no instant handler, because
+     nothing is ever sent to this socket. Acquired here rather than from
+     controlBTask so the socket table is complete before the scheduler
+     starts. */
+  tachoSocket = transport0.acquireSocket("TACHO");
+
+  controlBTaskHandle = osThreadNew(startControlBTask, NULL, &controlBTask_attributes);
+
   writer0.init(uart2_writeBlocking);
   reader0.init(uart2Queue, &writer0, transport0.queue);
 
@@ -463,10 +554,10 @@ void initTasks()
      the reader/writer setup it depends on. Still before the scheduler
      starts, so no task can see the socket half-registered.
 
-     With ADC00 below, transport0 now holds all six sockets
-     SERLINK_CONFIG__MAX_SOCKETS allows - RAD00, LED01, MOTOR and ADC00
-     here, DBG00 and MQTT0 later, from their own tasks. A seventh would
-     get a silent nullptr. */
+     transport0 holds seven of the SERLINK_CONFIG__MAX_SOCKETS slots -
+     RAD00, LED01, MOTOR, ADC00 and TACHO here, DBG00 and MQTT0 later,
+     from their own tasks. An acquire past the limit returns a silent
+     nullptr, which is why every socket pointer is checked before use. */
   motorSocket = transport0.acquireSocket("MOTOR", motorSockReceiveHandler,
     motorSockInstantHandler);
 
@@ -893,6 +984,67 @@ void startAdcTask(void *argument)
 }
 
 //--------------------------------------------------------------
+// controlB task - motorB closed loop, at CONTROLB_PERIOD_MS.
+//
+// For now it only services the tachometer. tachoB.update() drains the
+// timestamps the EXTI4 ISR has queued since the last pass and turns the
+// complete revolutions among them into an RPM; it does not block, so the
+// period is set here with vTaskDelayUntil rather than inside the driver.
+//
+// This is the one task allowed to call update(). The getters are safe
+// from anywhere - see the threading note in Tachometer.hpp.
+//
+// The speed control belongs between the update and the delay: read
+// tachoB.getRpm(), compare against a demand, drive motorB.setPercent().
+// Nothing does that yet - the motor still runs at the fixed
+// MOTORB_START_PERCENT that startMotorTask sets.
+void startControlBTask(void *argument)
+{
+  TickType_t xLastWakeTime = xTaskGetTickCount();
+  const TickType_t xFrequency = pdMS_TO_TICKS(CONTROLB_PERIOD_MS);
+
+  /* A whole number of loop passes - the static_assert above says so. */
+  const uint32_t publishEvery = TACHO_PUBLISH_PERIOD_MS / CONTROLB_PERIOD_MS;
+  uint32_t passes = 0U;
+
+  char speedData[1U + TACHO_RPM_FIELD_WIDTH];
+
+  for(;;)
+  {
+    tachoB.update();
+
+    /* Control loop goes here. */
+
+    if(++passes >= publishEvery)
+    {
+      passes = 0U;
+
+      if(tachoSocket != nullptr)
+      {
+        /* writeUintField() writes the low digits of whatever it is given,
+           so a value wider than the field would be silently mangled -
+           getRpm() saturates at 65535, which is five digits. Clamp to the
+           field instead, so an implausible reading shows as 9999 rather
+           than as some unrelated number. */
+        uint32_t rpmField = tachoB.getRpm();
+        if(rpmField > 9999U)
+        {
+          rpmField = 9999U;
+        }
+
+        speedData[0] = 'R';
+        writeUintField(rpmField, TACHO_RPM_FIELD_WIDTH, &speedData[1]);
+
+        /* Non-blocking, and fire and forget. */
+        tachoSocket->sendData(speedData, (uint16_t)sizeof(speedData), false);
+      }
+    }
+
+    vTaskDelayUntil(&xLastWakeTime, xFrequency);
+  }
+}
+
+//--------------------------------------------------------------
 // ADC00 socket - analog readings over SerLink0 (uart2).
 //
 // Reads only, so every command is handled by adcSockInstantHandler() and
@@ -1216,6 +1368,10 @@ static uint16_t bytesToHex(const uint8_t* src, uint8_t srcLen, char* dst)
    at or below configLIBRARY_MAX_SYSCALL_INTERRUPT_PRIORITY, so the
    FromISR call inside onIrq() is legal.
 
+   EXTI4 fires for the motorB tachometer (PF4, falling edge). That pin is
+   not in the .ioc, so its vector is hand written in stm32f4xx_it.c and
+   Tachometer::init() sets the same priority 7, for the same reason.
+
    extern "C" is mandatory: without it this compiles to a mangled symbol,
    HAL's __weak definition stays live, and the callback silently never
    fires. See the worked example at the bottom of app_main.cpp.
@@ -1230,6 +1386,12 @@ extern "C" void HAL_GPIO_EXTI_Callback(uint16_t GPIO_Pin)
   {
     radio.onIrq();
     radio1.onIrq();
+  }
+  else if(GPIO_Pin == TACHOB_PIN)
+  {
+    /* Reads TIM5->CNT and queues it. Nothing else - the arithmetic is
+       controlBTask's job. */
+    tachoB.onEdge();
   }
 }
 
