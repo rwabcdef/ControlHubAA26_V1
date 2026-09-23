@@ -61,6 +61,7 @@ TACHOU001005R0432   # 432 RPM. 'U', so the board expects no ack back
 #include "spi5.h"
 #include "Radio.hpp"
 #include "MqttPubSub.hpp"
+#include "SerLinkMqttAdapter.hpp"
 #include "lwip/netif.h"
 
 //--------------------------------------------------------------
@@ -199,6 +200,17 @@ const osThreadAttr_t controlBTask_attributes = {
   .priority = (osPriority_t) osPriorityNormal,
 };
 
+/* Definitions for mqtt2Task */
+// Owns mqtt2 - the receive side of the SerLink2 link and its connection.
+// The transmit side does not come through here: SerLinkMqttAdapter::write()
+// publishes from whichever task called it.
+osThreadId_t mqtt2TaskHandle;
+const osThreadAttr_t mqtt2Task_attributes = {
+  .name = "mqtt2Task",
+  .stack_size = 512 * 4,
+  .priority = (osPriority_t) osPriorityNormal,
+};
+
 //--------------------------------------------------------------
 void startWriter0Task(void *argument);
 void startReader0Task(void *argument);
@@ -216,6 +228,7 @@ void startRelayTask(void *argument);
 void startMotorTask(void *argument);
 void startAdcTask(void *argument);
 void startControlBTask(void *argument);
+void startMqtt2Task(void *argument);
 
 bool debugSockInstantHandler(SerLink::Frame &rxFrame, uint16_t* dataLen, char* data);
 
@@ -494,6 +507,39 @@ extern struct netif gnetif;   // lwip.c
 MqttPubSub mqtt(MQTT_BROKER_IP, MQTT_BROKER_PORT, MQTT_CLIENT_ID);
 
 //--------------------------------------------------------------
+// SerLink2 link layer - SerLink over MQTT, for the PC.
+//
+// mqtt2Client is a SECOND connection to the same broker, reserved for
+// SerLink and read by nothing but mqtt2. MqttPubSub has one rxQueue for
+// all of its subscriptions and receive() does not filter by topic, so two
+// tasks receiving on one client would steal each other's messages - which
+// is why this is a separate instance rather than another subscription on
+// mqtt. See the ownership note in SerLinkMqttAdapter.hpp.
+//
+// MQTT2_CLIENT_ID must differ from MQTT_CLIENT_ID: a second connection
+// with the same id kicks the first one off, and the two would sit there
+// disconnecting each other in a loop.
+//
+// The topics are a pair, not one topic. A broker delivers to every
+// subscriber including the publisher, so a single topic would feed every
+// frame and every ack straight back into our own Reader - the same trap
+// the MQTT_SUB_TOPIC comment above warns about.
+//
+//   down   PC -> controlHub    (subscribed to here)
+//   up     controlHub -> PC    (published here)
+//
+// The payload is the serialised frame exactly as it would appear on
+// uart2, so the strings at the top of this file can be pasted straight
+// into mosquitto_pub, and mosquitto_sub reads the link like a terminal.
+#define MQTT2_CLIENT_ID    "stm32-serlink"          // NOT MQTT_CLIENT_ID
+#define MQTT2_TOPIC_DOWN   "hub/aa26/serlink/down"  // subscribed to
+#define MQTT2_TOPIC_UP     "hub/aa26/serlink/up"    // published to
+
+MqttPubSub mqtt2Client(MQTT_BROKER_IP, MQTT_BROKER_PORT, MQTT2_CLIENT_ID);
+
+SerLinkMqttAdapter mqtt2(&mqtt2Client, MQTT2_TOPIC_UP, MQTT2_TOPIC_DOWN);
+
+//--------------------------------------------------------------
 void initTasks()
 {
   // Created synchronously here (rather than inside startSerLink0Task) so
@@ -589,6 +635,18 @@ void initTasks()
   // Creates mqtt.rxQueue, before mqttRxTask can block on it. Subscribing has
   // to wait for lwIP, so that happens in mqttTask.
   mqtt.init();
+
+  /* The SerLink2 link layer. init() creates mqtt2's frame queue and
+     mqtt2Client's rxQueue and touches no lwIP, so it belongs here; the
+     connection itself cannot start until MX_LWIP_Init() has run, and so
+     happens in startMqtt2Task.
+
+     Nothing consumes mqtt2.rxDataQueue yet - reader2, writer2 and
+     transport2 are not built. Until they are, this brings the link up and
+     counts what arrives, which is what makes it testable on its own. */
+  mqtt2.init();
+
+  mqtt2TaskHandle = osThreadNew(startMqtt2Task, NULL, &mqtt2Task_attributes);
 
   mqttTaskHandle = osThreadNew(startMqttTask, NULL, &mqttTask_attributes);
 
@@ -1174,6 +1232,28 @@ void startMqttTask(void *argument)
     }
 
     osDelay(MQTT_PUBLISH_PERIOD_MS);
+  }
+}
+
+//--------------------------------------------------------------
+// Owns mqtt2: the only caller of its receive path, and the task that keeps
+// the connection up. See SerLinkMqttAdapter.hpp for why the transmit side
+// is not here - write() publishes directly from the caller's task.
+void startMqtt2Task(void *argument)
+{
+  /* Same wait as startMqttTask. initTasks() ran before MX_LWIP_Init(),
+     which is what creates the tcpip core lock that start() reaches
+     through, and the netif coming up is the signal that it exists. */
+  while(!netif_is_up(&gnetif) || !netif_is_link_up(&gnetif))
+  {
+    osDelay(500);
+  }
+
+  mqtt2.start();
+
+  for(;;)
+  {
+    mqtt2.run();
   }
 }
 

@@ -134,6 +134,7 @@
 									<listOptionValue builtIn="false" value="../Components/Adapters/LinkInterface"/>
 									<listOptionValue builtIn="false" value="../Components/Adapters/Uart"/>
 									<listOptionValue builtIn="false" value="../Components/Adapters/Radio"/>
+									<listOptionValue builtIn="false" value="../Components/Adapters/Mqtt"/>
 									<listOptionValue builtIn="false" value="../Components/Tachometer"/>
 									<listOptionValue builtIn="false" value="../Components/Adc"/>
 									<listOptionValue builtIn="false" value="../Core/Inc"/>
@@ -348,6 +349,7 @@
 									<listOptionValue builtIn="false" value="../Components/Adapters/LinkInterface"/>
 									<listOptionValue builtIn="false" value="../Components/Adapters/Uart"/>
 									<listOptionValue builtIn="false" value="../Components/Adapters/Radio"/>
+									<listOptionValue builtIn="false" value="../Components/Adapters/Mqtt"/>
 									<listOptionValue builtIn="false" value="../Components/Tachometer"/>
 									<listOptionValue builtIn="false" value="../Core/Inc"/>
 									<listOptionValue builtIn="false" value="../LWIP/App"/>

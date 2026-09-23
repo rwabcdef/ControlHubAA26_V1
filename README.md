@@ -60,6 +60,11 @@ More -> Create rule
   remote port: 1883
 
 #2) Make sure ethernet cable is in NUCLEO-F439ZI
+
+#3) Open app (In Vs code): C:\Users\rwabc\Software\Development\MQTT\mqtt_dev1\
+In terminal:
+npm run pubsub    (this will send a ndreceive mqtt messages between dev kit and PC)
+
 #--------------------------------------------------------------------
 ## Motor (with TC78H611FNG and TC78H611FNG_Standby)
 

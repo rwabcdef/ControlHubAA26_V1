@@ -1,0 +1,23 @@
+
+
+-----------------------------------------------------------------------------
+Wed 23/09/2026
+
+Implemented: Tachometer and SerLinkMqttAdapter functionality.
+
+Tachometer has high speed issues.
+
+Call mqtt2.write("DBG00A347900\n") from the debugger and watch mosquitto_sub -t hub/aa26/serlink/up
+
+What's still needed for transport2
+reader2, writer2, transport2 and their tasks — and the blocker stands:
+Reader::uartWrite() has no generic write path, so reader2 would silently never ack.
+That plus per-instance WRITER_ACK_TIMEOUT_MS / ACK_DELAY_MS, and Writer::idle()
+no longer discarding the write return code. Say the word and I'll do those next.
+
+Unrelated: README.md shows as modified in git — that's your edit,
+I didn't touch it. And the Release configuration is still missing
+../Components/Adc from before; I added Adapters/Mqtt to both configs,
+but Release won't build until that older gap is closed.
+
+-----------------------------------------------------------------------------
