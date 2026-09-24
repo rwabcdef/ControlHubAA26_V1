@@ -84,6 +84,10 @@ Tachometer::Tachometer(TIM_TypeDef* timebase, GPIO_TypeDef* port, uint16_t pin)
     revStartTick(0U),
     hasRevStart(false),
     edgesSinceRevStart(0U),
+    avgTicks(),
+    avgIndex(0U),
+    avgCount(0U),
+    avgTicksSum(0U),
     lastSeenTick(0U),
     hasSeenEdge(false)
 {
@@ -175,11 +179,17 @@ bool Tachometer::startPin()
   gpioInit.Mode = GPIO_MODE_IT_FALLING;
 
   /* The magnet pulls the 3144 open collector output low, so the line
-     idles high and the falling edge is the magnet arriving. The pull-up
-     costs nothing against the level shifter push-pull drive and keeps the
-     input defined if the sensor is ever unplugged - without it a floating
-     pin would generate edges of its own. */
-  gpioInit.Pull = GPIO_PULLUP;
+     idles high and the falling edge is the magnet arriving.
+
+     No internal pull-up. The level shifter is a BC182L emitter follower
+     (collector at 12 V) into a 33k/12k divider, with PF4 on the tap. It
+     drives high, but low is only the divider itself - 33k || 12k = 8.8k
+     to ground once the transistor is off. The ~40k pull-up against that
+     held the low at ~0.8 V, under 0.2 V from VIL, and the fuzz on it
+     produced phantom falling edges: readings of 2x and 3x the true
+     speed, and 2/3x when an edge was missed. The 12k already keeps the
+     pin defined while the shifter is connected. */
+  gpioInit.Pull = GPIO_NOPULL;
   HAL_GPIO_Init(port, &gpioInit);
 
   IRQn_Type irqn = irqnForPin(pin);
@@ -202,6 +212,19 @@ void Tachometer::onEdge()
   /* First statement in the ISR path: the sooner CNT is read, the less of
      whatever latency got us here ends up in the timestamp. */
   uint32_t now = timebase->CNT;
+
+  /* A real magnet holds the line low for milliseconds; a spike coupled in
+     from the motor PWM is gone within microseconds. By the time the ISR
+     gets here - a microsecond or two after the edge - a real edge is
+     still low and a spike has already let go. The divider feeding PF4 is
+     ~8.8k in both states, so the line picks such spikes up readily, and
+     EXTI latches ones far too short for a scope at 100 ms/div to show.
+     Read IDR directly: this is the ISR hot path. */
+  if((port->IDR & pin) != 0U)
+  {
+    glitchCount++;
+    return;
+  }
 
   /* Unsigned difference, so this is correct across the counter wrap. */
   if(hasLastEdge && ((uint32_t)(now - lastEdgeTick) < TACHO__MIN_EDGE_TICKS))
@@ -227,8 +250,7 @@ void Tachometer::onEdge()
 
 void Tachometer::update()
 {
-  uint32_t revTicksTotal = 0U;
-  uint16_t revsThisPass = 0U;
+  bool revCompleted = false;
 
   uint32_t tick = 0U;
   while(xQueueReceive(queue, &tick, 0U) == pdTRUE)
@@ -252,8 +274,8 @@ void Tachometer::update()
     {
       /* A whole turn of the wheel, so the uneven magnet spacing has
          cancelled - see the note in Tachometer.hpp. */
-      revTicksTotal += (uint32_t)(tick - revStartTick);
-      revsThisPass++;
+      pushRevTicks((uint32_t)(tick - revStartTick));
+      revCompleted = true;
       revolutions++;
 
       revStartTick = tick;
@@ -261,16 +283,16 @@ void Tachometer::update()
     }
   }
 
-  if((revsThisPass > 0U) && (revTicksTotal > 0U))
+  if(revCompleted && (avgTicksSum > 0U))
   {
-    /* revsThisPass revolutions took revTicksTotal ticks. Averaging them
-       together rather than keeping only the last one is both what a
-       control loop wants and free resolution: the quantisation is one
-       tick over the whole span, not one tick per revolution.
+    /* The last avgCount revolutions took avgTicksSum ticks - see
+       TACHO__AVG_REVS. Dividing total revolutions by total time, rather
+       than averaging per-revolution RPMs, is the correct mean for a rate
+       and keeps the quantisation at one tick over the whole window.
 
-       Worst case here is QUEUE_LENGTH/PULSES_PER_REV revolutions, so the
-       numerator stays far inside 32 bits. */
-    uint32_t computed = ((uint32_t)revsThisPass * TICK_HZ * 60U) / revTicksTotal;
+       avgCount * TICK_HZ * 60 is at most 16 * 600,000, far inside 32
+       bits whatever TACHO__AVG_REVS is set to within its limit. */
+    uint32_t computed = ((uint32_t)avgCount * TICK_HZ * 60U) / avgTicksSum;
 
     rpm = (computed > 0xFFFFU) ? 0xFFFFU : (uint16_t)computed;
     stalled = false;
@@ -291,6 +313,37 @@ void Tachometer::update()
        from before the stop and report an absurdly low first speed. */
     hasRevStart = false;
     edgesSinceRevStart = 0U;
+
+    /* And the averaging window, for the same reason: revolutions from
+       before a stop say nothing about the speed after it. */
+    avgCount = 0U;
+    avgIndex = 0U;
+    avgTicksSum = 0U;
+  }
+}
+
+void Tachometer::pushRevTicks(uint32_t ticks)
+{
+  /* Running sum over a ring: subtract the revolution falling out of the
+     window, add the new one. Until the ring has filled, the average is
+     over however many revolutions there are, so the first reading after
+     a start comes from one revolution rather than waiting for four. */
+  if(avgCount == TACHO__AVG_REVS)
+  {
+    avgTicksSum -= avgTicks[avgIndex];
+  }
+  else
+  {
+    avgCount++;
+  }
+
+  avgTicks[avgIndex] = ticks;
+  avgTicksSum += ticks;
+
+  avgIndex++;
+  if(avgIndex >= TACHO__AVG_REVS)
+  {
+    avgIndex = 0U;
   }
 }
 

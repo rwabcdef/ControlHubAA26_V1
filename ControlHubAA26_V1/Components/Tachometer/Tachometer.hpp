@@ -41,9 +41,10 @@
  *
  * So update() only ever times a *whole* revolution: it counts edges and
  * uses the interval between every PULSES_PER_REV-th one. Whatever the
- * spacing error is, it cancels over a full turn. Several revolutions
- * completing inside one update() are averaged together, which is both
- * what a control loop wants and free extra resolution at speed.
+ * spacing error is, it cancels over a full turn. On top of that the
+ * reading is a moving average over the last TACHO__AVG_REVS revolutions,
+ * which damps what noise the edge filtering in onEdge() lets through and
+ * is free extra resolution at speed.
  *
  * Stall
  * -----
@@ -82,10 +83,23 @@
 #define TACHO__QUEUE_LENGTH 16
 
 // Edges closer together than this are treated as a glitch and dropped.
-// 2 ticks at 10 kHz is 200 us, i.e. a ceiling of about 150,000 RPM - set
-// deliberately far above anything real, so a genuine edge is never
-// discarded. Tighten it only against a measured maximum speed.
-#define TACHO__MIN_EDGE_TICKS 2
+// 20 ticks at 10 kHz is 2 ms. The magnets split a turn roughly 45/55, so
+// the shorter interval is ~0.45 rev and the ceiling is about 13,500 RPM -
+// still far above this gearbox. Was 2 ticks (200 us), which let through
+// noise landing a few hundred us after a real edge. The level check in
+// onEdge() handles spikes; this handles chatter around a real edge.
+#define TACHO__MIN_EDGE_TICKS 20
+
+// Moving average: the reading is taken over the most recent this-many
+// whole revolutions (total revolutions / total time), updated at every
+// revolution rather than at every update(). More is smoother but slower
+// to follow a change - the window is AVG_REVS revolutions long, so ~1 s
+// at 240 RPM with 4. A control loop sees that as lag. Limited to 16 to
+// keep the arithmetic in update() inside 32 bits.
+#define TACHO__AVG_REVS 4
+
+static_assert((TACHO__AVG_REVS >= 1) && (TACHO__AVG_REVS <= 16),
+  "TACHO__AVG_REVS must be 1..16");
 
 // No edge for this long means stopped. Must be longer than the slowest
 // pulse interval the motor can legitimately produce, or a slow crawl
@@ -171,6 +185,14 @@ class Tachometer
     bool     hasRevStart;
     uint8_t  edgesSinceRevStart;
 
+    // Task side only: the moving average window. A ring of the last
+    // TACHO__AVG_REVS revolution times with a running sum; avgCount is
+    // how many slots are valid, which is fewer until the ring fills.
+    uint32_t avgTicks[TACHO__AVG_REVS];
+    uint8_t  avgIndex;
+    uint8_t  avgCount;
+    uint32_t avgTicksSum;
+
     // Task side only: when the last edge of any kind was seen, for the
     // stall timeout. Valid only while hasSeenEdge.
     uint32_t lastSeenTick;
@@ -178,6 +200,7 @@ class Tachometer
 
     bool startTimebase();
     bool startPin();
+    void pushRevTicks(uint32_t ticks);
 };
 
 #endif /* TACHOMETER_HPP_ */
