@@ -23,8 +23,10 @@ LED01T492002A1
 LED01T492002A0
 
 # Motor socket - the TC78H611FNG dual H-bridge on TIM8, channel B (IN1B/IN2B on J10 pins 10 and 8)
-MOTORT516005BP050
+MOTORT516005BP050   # open loop: 50% duty (also turns closed loop off)
 MOTORT516005BP010
+MOTORT516006BS0300  # closed loop: hold 300 RPM (controllerB takes over)
+MOTORT529003BGS     # read the required RPM back, 4 digits
 
 # Adc socket - ADC1, ranks IN0/IN3/IN4/IN5 (PA0/PA3/PA4/PA5). Channel 1 is the motorB current sense.
 ADC00T529002G1      # raw count, 4 digits
@@ -57,6 +59,7 @@ TACHOU001005R0432   # 432 RPM. 'U', so the board expects no ack back
 #include "TC78H611FNG_Standby.hpp"
 #include "Adc.hpp"
 #include "Tachometer.hpp"
+#include "Controller.hpp"
 #include "nRF24L01.hpp"
 #include "spi5.h"
 #include "Radio.hpp"
@@ -417,6 +420,45 @@ static_assert((TACHO_PUBLISH_PERIOD_MS % CONTROLB_PERIOD_MS) == 0,
 SerLink::Socket* tachoSocket = nullptr;
 
 //--------------------------------------------------------------
+// motorB speed controller, run by controlBTask - see Controller.hpp.
+//
+// Idle until the MOTOR socket's set speed command (<sel>S<dddd>) enables
+// it; a set percent command (<sel>P<ddd>) disables it again and puts the
+// motor back in open loop. While it is enabled it owns motorB's duty
+// cycle, and a percent written by anything else is overwritten on the
+// next pass.
+//
+// CONTROLB_INTEGRAL_GAIN is duty cycle percent per RPM of error, per
+// pass. At 20 Hz, 0.002 moves the output 4%/s for a 100 RPM error. That
+// is deliberately slow: the tachometer's reading lags by up to a
+// revolution-average (~1 s at low speed), and this law keeps integrating
+// through the lag. Raise it once the response has been seen.
+//
+// CONTROLB_MAX_PLAUSIBLE_RPM only has to catch sensor faults, so it sits
+// well above anything this gearbox reaches - lower it if a real top
+// speed is known.
+#define CONTROLB_INTEGRAL_GAIN      0.002f
+#define CONTROLB_OUTPUT_MIN_PERCENT 0U
+#define CONTROLB_OUTPUT_MAX_PERCENT 100U
+#define CONTROLB_MAX_PLAUSIBLE_RPM  3000U
+
+// Captureless lambdas, so they convert to the plain function pointers
+// ControllerConfig takes (see the note on its constructor).
+static const ControllerConfig controllerBConfig =
+{
+  []() -> uint16_t { return tachoB.getRpm(); },           // getRpm
+  []() -> uint8_t  { return motorB.getPercent(); },       // getPwmPercent
+  [](uint8_t percent) { motorB.setPercent(percent); },    // setPwmPercent
+  CONTROLB_INTEGRAL_GAIN,
+  CONTROLB_OUTPUT_MIN_PERCENT,
+  CONTROLB_OUTPUT_MAX_PERCENT,
+  CONTROLB_MAX_PLAUSIBLE_RPM,
+  CONTROLB_PERIOD_MS
+};
+
+Controller controllerB(controllerBConfig);
+
+//--------------------------------------------------------------
 // Analog inputs - ADC1, four ranks, scanned continuously into a circular
 // DMA buffer. See Adc.hpp for how the sampling is arranged.
 //
@@ -587,6 +629,10 @@ void initTasks()
      controlBTask so the socket table is complete before the scheduler
      starts. */
   tachoSocket = transport0.acquireSocket("TACHO");
+
+  /* Only validates the config - the controller stays disabled until a
+     set speed command arrives. Before controlBTask exists, like tachoB. */
+  controllerB.init();
 
   controlBTaskHandle = osThreadNew(startControlBTask, NULL, &controlBTask_attributes);
 
@@ -855,6 +901,9 @@ void startMotorTask(void *argument)
 //   ACK_OK - the ack says the frame arrived, not that the motor moved:
 //
 //     MOTORT516005AP030    percent = 30%   (always 3 digits, zero padded)
+//                          - open loop: also disables the speed controller
+//     MOTORT516006AS0300   speed = 300 RPM (always 4 digits, zero padded)
+//                          - closed loop: enables the speed controller
 //     MOTORT523003ADF      direction = forward
 //     MOTORT523003ADR      direction = reverse
 //     MOTORT523003ADD      direction = disabled
@@ -865,6 +914,11 @@ void startMotorTask(void *argument)
 //     MOTORT529003AGP  ->  MOTORA529003030    percent,   3 digits
 //     MOTORT529003AGF  ->  MOTORA5290041000   frequency, 4 digits (Hz)
 //     MOTORT529003AGD  ->  MOTORA529001F      direction, one of F/R/D
+//     MOTORT529003AGS  ->  MOTORA5290040300   required speed, 4 digits (RPM)
+//
+// The speed set only takes effect while there is a direction: with it
+// idle the controller holds (see startControlBTask). Set a direction as
+// well as a speed.
 //
 // <selector> is the TC78H611FNG bridge channel. Only channel B is wired
 // (IN1B/IN2B on J10 pins 10 and 8), so for now 'A' and 'B' both reach
@@ -878,6 +932,8 @@ void startMotorTask(void *argument)
 // Selector + command. Everything past this is command specific.
 #define MOTOR_CMD_MIN_LEN   2U
 #define MOTOR_CMD_SET_PERCENT_LEN  5U   // <sel>P<ddd>
+#define MOTOR_CMD_SET_SPEED_LEN    6U   // <sel>S<dddd>
+#define MOTOR_RPM_FIELD_WIDTH      4U
 #define MOTOR_CMD_DIRECTION_LEN    3U   // <sel>D<F|R|D> and <sel>G<P|F|D>
 
 // Only channel B of the TC78H611FNG is built, so both selectors resolve
@@ -890,6 +946,21 @@ static TC78H611FNG* motorForSelector(char selector)
     case 'A':   // -> &motorA once channel A hardware exists
     case 'B':
       return &motorB;
+
+    default:
+      return nullptr;
+  }
+}
+
+// The speed controller for a selector, on the same terms as
+// motorForSelector(): both reach motorB's controller for now.
+static Controller* controllerForSelector(char selector)
+{
+  switch(selector)
+  {
+    case 'A':   // -> &controllerA once channel A hardware exists
+    case 'B':
+      return &controllerB;
 
     default:
       return nullptr;
@@ -973,9 +1044,36 @@ void motorSockReceiveHandler(const char* data, uint16_t dataLen)
       if((dataLen == MOTOR_CMD_SET_PERCENT_LEN) &&
          readUintField(&data[2], 3U, &percent))
       {
+        /* A percent means open loop, so the controller lets go first.
+           Order matters: disable() before setPercent() is what guarantees
+           a controller pass already in flight cannot overwrite this value
+           - see Threading in Controller.hpp. */
+        Controller* controller = controllerForSelector(data[0]);
+        if(controller != nullptr)
+        {
+          controller->disable();
+        }
+
         // No range check needed: setPercent() clamps above 100 itself,
         // and three digits cannot exceed 999.
         motor->setPercent((uint8_t)percent);
+      }
+      break;
+    }
+
+    case 'S':   // <sel>S<dddd> - set speed (RPM), closed loop
+    {
+      uint32_t rpm;
+      Controller* controller = controllerForSelector(data[0]);
+
+      if((controller != nullptr) &&
+         (dataLen == MOTOR_CMD_SET_SPEED_LEN) &&
+         readUintField(&data[2], MOTOR_RPM_FIELD_WIDTH, &rpm))
+      {
+        /* Demand first, so the first pass after enabling already works
+           towards it. Four digits cannot exceed uint16_t. */
+        controller->setRequiredRpm((uint16_t)rpm);
+        controller->enable();
       }
       break;
     }
@@ -1039,6 +1137,18 @@ bool motorSockInstantHandler(SerLink::Frame &rxFrame, uint16_t* dataLen, char* d
       *dataLen = 1U;
       return true;
 
+    case 'S':   // required speed in RPM, 4 digits - same format the set takes
+    {
+      Controller* controller = controllerForSelector(rxFrame.data[0]);
+      if(controller == nullptr)
+      {
+        return false;
+      }
+      writeUintField(controller->getRequiredRpm(), MOTOR_RPM_FIELD_WIDTH, data);
+      *dataLen = MOTOR_RPM_FIELD_WIDTH;
+      return true;
+    }
+
     default:
       return false;
   }
@@ -1070,10 +1180,10 @@ void startAdcTask(void *argument)
 // This is the one task allowed to call update(). The getters are safe
 // from anywhere - see the threading note in Tachometer.hpp.
 //
-// The speed control belongs between the update and the delay: read
-// tachoB.getRpm(), compare against a demand, drive motorB.setPercent().
-// Nothing does that yet - the motor still runs at the fixed
-// MOTORB_START_PERCENT that startMotorTask sets.
+// controllerB runs between the update and the delay, so it always sees
+// the reading taken this pass. It does nothing until the MOTOR socket
+// enables it; until then the motor runs open loop, at whatever percent
+// startMotorTask or the socket last set.
 void startControlBTask(void *argument)
 {
   TickType_t xLastWakeTime = xTaskGetTickCount();
@@ -1089,7 +1199,19 @@ void startControlBTask(void *argument)
   {
     tachoB.update();
 
-    /* Control loop goes here. */
+    /* With the direction idle the bridge is stopped and the tacho reads
+       zero whatever the duty cycle, so running the controller would only
+       wind the output up to its limit for the motor to lurch at on the
+       next direction change. hold() parks it instead, and it resumes
+       from the motor's duty cycle once there is a direction again. */
+    if(motorB.getDirection() == TC78H611FNG::idle)
+    {
+      controllerB.hold();
+    }
+    else
+    {
+      controllerB.run();
+    }
 
     if(++passes >= publishEvery)
     {
