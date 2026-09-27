@@ -33,6 +33,64 @@
 /* Private typedef -----------------------------------------------------------*/
 /* USER CODE BEGIN PTD */
 
+/* Snapshot taken by Error_Handler() so an intermittent failure can be
+   diagnosed after the fact. Halt in the debugger (or attach WITHOUT reset
+   if it failed standalone - a reset wipes RAM) and inspect errorSnapshot
+   in the Expressions / Live Expressions view.
+
+   The raw register copies are kept alongside the decoded flags so nothing
+   is lost if the decoding turns out to be the wrong question. Bit
+   positions are RM0090 (STM32F42x/43x reference manual). */
+typedef struct
+{
+  uint32_t caller;          /* return address into the function that called
+                               Error_Handler() - paste into the Disassembly
+                               view or addr2line to get the file:line */
+  uint32_t tick;            /* HAL tick (ms since boot) at the failure */
+
+  /* Reset cause for THIS boot, latched in main() before anything runs.
+     RCC_CSR bits 31..24: LPWR WWDG IWDG SFT POR PIN BOR (RM0090 7.3.21) */
+  uint32_t bootRccCsr;
+  uint8_t  resetByLowPower;
+  uint8_t  resetByWwdg;
+  uint8_t  resetByIwdg;
+  uint8_t  resetBySoftware;
+  uint8_t  resetByPorPdr;   /* power-on / power-down reset */
+  uint8_t  resetByPin;      /* NRST - the reset button, or ST-LINK */
+  uint8_t  resetByBor;      /* brown-out: VDD sagged below the BOR level */
+
+  /* Clock tree at the failure. HSE is in BYPASS, fed by the ST-LINK's
+     8 MHz MCO, so an ST-LINK that is unpowered or still enumerating
+     shows up here as hseReady == 0. */
+  uint32_t rccCr;
+  uint32_t rccCfgr;
+  uint32_t rccCir;
+  uint8_t  hseReady;        /* RCC_CR.HSERDY */
+  uint8_t  pllReady;        /* RCC_CR.PLLRDY */
+  uint8_t  sysclkSource;    /* RCC_CFGR.SWS: 0 = HSI, 1 = HSE, 2 = PLL */
+  uint8_t  clockSecurityFault; /* RCC_CIR.CSSF: HSE failed while in use */
+
+  /* Supply. The PVD is switched on by Error_Handler() itself at its
+     highest threshold (2.9 V) purely to take this one reading. */
+  uint32_t pwrCr;
+  uint32_t pwrCsr;
+  uint8_t  vddBelow2V9;     /* PWR_CSR.PVDO after enabling the PVD */
+  uint8_t  regulatorScaleReady; /* PWR_CSR.VOSRDY */
+
+  /* BOR threshold from the option bytes (FLASH_OPTCR.BOR_LEV, RM0090 3.7.1):
+     3 = BOR off (reset only at ~1.7 V POR/PDR), 2 = 2.1 V, 1 = 2.4 V,
+     0 = 2.7 V. With BOR off a sagging supply is not caught by a clean
+     reset - the part can run on at marginal voltage and fail oddly. */
+  uint8_t  borLevel;
+
+  /* Ethernet. HAL_ETH_Init() fails when the MAC DMA software reset never
+     completes, which happens when the LAN8742 is not supplying the 50 MHz
+     RMII REF_CLK. ETH_DMABMR.SR still set means exactly that. Only
+     meaningful when ethClockEnabled is set. */
+  uint8_t  ethClockEnabled; /* RCC_AHB1ENR.ETHMACEN */
+  uint8_t  ethDmaResetStuck;/* ETH_DMABMR.SR */
+} ErrorSnapshot_t;
+
 /* USER CODE END PTD */
 
 /* Private define ------------------------------------------------------------*/
@@ -79,6 +137,14 @@ const osThreadAttr_t testTask_attributes = {
   .priority = (osPriority_t) osPriorityNormal,
 };
 
+/* Reset cause for this boot - see ErrorSnapshot_t. Also worth a look when
+   there is no failure: a board that "just reset" shows why here. */
+volatile uint32_t bootResetFlags;
+
+/* Filled in by Error_Handler(); errorSnapshotValid is 0 until then. */
+volatile ErrorSnapshot_t errorSnapshot;
+volatile uint32_t errorSnapshotValid;
+
 /* USER CODE END PV */
 
 /* Private function prototypes -----------------------------------------------*/
@@ -114,6 +180,13 @@ int main(void)
 {
 
   /* USER CODE BEGIN 1 */
+
+  /* The RCC_CSR reset flags are sticky: they accumulate across every reset
+     until cleared, so without RMVF a pin reset after a brown-out would
+     still show BOR. Latch them, then clear, so each boot reports only its
+     own cause. Plain register access - this runs before HAL_Init(). */
+  bootResetFlags = RCC->CSR;
+  RCC->CSR |= RCC_CSR_RMVF;
 
   /* USER CODE END 1 */
 
@@ -864,9 +937,66 @@ void Error_Handler(void)
 {
   /* USER CODE BEGIN Error_Handler_Debug */
   /* User can add his own implementation to report the HAL error return state */
+
+  /* Must be the first statement, before anything else can disturb LR. */
+  uint32_t caller = (uint32_t)__builtin_return_address(0);
+
   __disable_irq();
+
+  volatile ErrorSnapshot_t* s = &errorSnapshot;
+
+  s->caller = caller;
+  s->tick   = uwTick;
+
+  s->bootRccCsr      = bootResetFlags;
+  s->resetByLowPower = (bootResetFlags & RCC_CSR_LPWRRSTF) != 0U;
+  s->resetByWwdg     = (bootResetFlags & RCC_CSR_WWDGRSTF) != 0U;
+  s->resetByIwdg     = (bootResetFlags & RCC_CSR_IWDGRSTF) != 0U;
+  s->resetBySoftware = (bootResetFlags & RCC_CSR_SFTRSTF)  != 0U;
+  s->resetByPorPdr   = (bootResetFlags & RCC_CSR_PORRSTF)  != 0U;
+  s->resetByPin      = (bootResetFlags & RCC_CSR_PINRSTF)  != 0U;
+  s->resetByBor      = (bootResetFlags & RCC_CSR_BORRSTF)  != 0U;
+
+  s->rccCr   = RCC->CR;
+  s->rccCfgr = RCC->CFGR;
+  s->rccCir  = RCC->CIR;
+  s->hseReady           = (s->rccCr & RCC_CR_HSERDY) != 0U;
+  s->pllReady           = (s->rccCr & RCC_CR_PLLRDY) != 0U;
+  s->sysclkSource       = (uint8_t)((s->rccCfgr & RCC_CFGR_SWS) >> RCC_CFGR_SWS_Pos);
+  s->clockSecurityFault = (s->rccCir & RCC_CIR_CSSF) != 0U;
+
+  /* PVD at 2.9 V (PLS = 7). PWR is normally already clocked by
+     SystemClock_Config(), but this may be running before it has. The PVD
+     comparator needs a short settling time (tens of us, DS9484) - the
+     loop gives well over that even at 168 MHz. */
+  RCC->APB1ENR |= RCC_APB1ENR_PWREN;
+  (void)RCC->APB1ENR;
+  PWR->CR = (PWR->CR & ~PWR_CR_PLS) | PWR_CR_PLS_LEV7 | PWR_CR_PVDE;
+  for (volatile uint32_t i = 0; i < 20000U; i++) { }
+  s->pwrCr  = PWR->CR;
+  s->pwrCsr = PWR->CSR;
+  s->vddBelow2V9         = (s->pwrCsr & PWR_CSR_PVDO)   != 0U;
+  s->regulatorScaleReady = (s->pwrCsr & PWR_CSR_VOSRDY) != 0U;
+
+  s->borLevel = (uint8_t)((FLASH->OPTCR & FLASH_OPTCR_BOR_LEV) >> FLASH_OPTCR_BOR_LEV_Pos);
+
+  s->ethClockEnabled  = (RCC->AHB1ENR & RCC_AHB1ENR_ETHMACEN) != 0U;
+  s->ethDmaResetStuck = s->ethClockEnabled && ((ETH->DMABMR & ETH_DMABMR_SR) != 0U);
+
+  errorSnapshotValid = 1U;
+
+  /* Flash LD3 (red, PB14) so a failure is visible without a debugger.
+     Driven by register because this can run before MX_GPIO_Init(). The
+     rate depends on whichever clock is running, so it is only a "we are
+     in here" signal, not a timing. */
+  RCC->AHB1ENR |= RCC_AHB1ENR_GPIOBEN;
+  (void)RCC->AHB1ENR;
+  LD3_GPIO_Port->MODER = (LD3_GPIO_Port->MODER & ~(3U << (14U * 2U))) | (1U << (14U * 2U));
+
   while (1)
   {
+    LD3_GPIO_Port->ODR ^= LD3_Pin;
+    for (volatile uint32_t i = 0; i < 2000000U; i++) { }
   }
   /* USER CODE END Error_Handler_Debug */
 }

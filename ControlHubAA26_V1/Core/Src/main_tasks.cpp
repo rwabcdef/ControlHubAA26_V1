@@ -475,6 +475,8 @@ SerLink::Socket* adcSocket = nullptr;
 #define RADIO_IRQ_TIMEOUT_MS 1000   // Mode::Interrupt: backstop wake if an nINT
                                     // edge is ever missed
 #define RADIO_TX_PERIOD_MS   3000   // radioTxTask: one count packet per period
+#define RADIO1_DETECT_TIMEOUT_MS 500 // radio1Task: how long the boot-time detect
+                                     // check waits for the module (Tpor is 100 ms)
 
 nRF24L01 radio(nRF24L01_CE_GPIO_Port,  nRF24L01_CE_Pin,
                nRF24L01_SS_GPIO_Port,  nRF24L01_SS_Pin);
@@ -773,8 +775,24 @@ void startSerLink1Task(void *argument)
 }
 
 // Owns the nRF24L01 while RADIO_SERLINK is set: all SPI to it happens here.
+//
+// The detect check first gives a definite answer on whether the module was
+// there at boot - radio1.run() on its own just retries INIT silently
+// forever. The result is in radio1Detected for the debugger, and on LD2
+// (blue): lit if the radio answered. A miss is not fatal: run() still
+// brings the module up if it is connected later, but LD2 only reports the
+// boot-time check. radio1DetectStatus is the STATUS byte the module
+// returned - see Radio::detect() for what each value points at.
+volatile bool    radio1Detected     = false;
+volatile uint8_t radio1DetectStatus = 0;
+
 void startRadio1Task(void *argument)
 {
+  uint8_t status = 0;
+  radio1Detected     = radio1.detect(RADIO1_DETECT_TIMEOUT_MS, &status);
+  radio1DetectStatus = status;
+  HAL_GPIO_WritePin(LD2_GPIO_Port, LD2_Pin, radio1Detected ? GPIO_PIN_SET : GPIO_PIN_RESET);
+
   for(;;)
   {
     radio1.run();

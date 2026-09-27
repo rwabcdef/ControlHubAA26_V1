@@ -48,6 +48,37 @@ void Radio::init(const uint8_t* address)
     this->eventQueueStorageArea, &this->eventStaticQueue);
 }
 
+bool Radio::detect(uint32_t timeoutMs, uint8_t* status)
+{
+  /* Polled rather than probed once: the device ignores SPI for up to
+     100 ms (Tpor) after VDD comes up, and at power-on this task can be
+     running inside that window. isPresent() restores RF_CH, the one
+     register it touches, so initDevice() finds the device as it was.
+     CE and CSN are already parked by MX_GPIO_Init(). */
+  const TickType_t start   = xTaskGetTickCount();
+  const TickType_t timeout = pdMS_TO_TICKS(timeoutMs);
+
+  for(;;)
+  {
+    if(status != nullptr)
+    {
+      *status = this->nrf.getStatus();
+    }
+
+    if(this->nrf.isPresent())
+    {
+      return true;
+    }
+
+    if((xTaskGetTickCount() - start) >= timeout)
+    {
+      return false;
+    }
+
+    vTaskDelay(pdMS_TO_TICKS(DETECT_POLL_MS));
+  }
+}
+
 void Radio::run()
 {
   switch(this->currentState)

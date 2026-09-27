@@ -72,6 +72,21 @@ class Radio : public StateMachine
     // until it answers on SPI; the state machine then goes to IDLE.
     void init(const uint8_t* address = DEFAULT_ADDRESS);
 
+    // Probes the device over SPI, without configuring it, until it answers
+    // or timeoutMs runs out. true if it answered. This is SPI to the device
+    // like everything else, so call it only from the owning task, before
+    // its first run(). Purely a report: run() does not depend on it, and
+    // still brings a late-connected device up by itself.
+    //
+    // status, if given, gets the STATUS register from the last probe - the
+    // quickest wiring diagnosis when detect() fails:
+    //   0x0E  reset value: the device is alive (so suspect RF_CH writes,
+    //         i.e. MOSI or SCK)
+    //   0x00  MISO stuck low - usually no power to the module
+    //   0xFF  MISO floating high - nothing driving it: CSN, SCK or MISO
+    //         miswired, or the module is not powered
+    bool detect(uint32_t timeoutMs, uint8_t* status = nullptr);
+
     // Services one state. Call repeatedly from the one task that owns this
     // radio, after init(). Blocks until there is something to do.
     void run();
@@ -96,6 +111,7 @@ class Radio : public StateMachine
     static const uint8_t  PACKET_FLAG_START = 0x01;
     static const uint8_t  CHANNEL           = 76;
     static const uint32_t INIT_RETRY_MS     = 1000;
+    static const uint32_t DETECT_POLL_MS    = 50;
 
     // rx() drains the RX FIFO after this long with no event at all, in case
     // an nINT edge was ever missed.
