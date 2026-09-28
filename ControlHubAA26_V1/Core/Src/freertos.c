@@ -52,6 +52,17 @@
 
 /* USER CODE END FunctionPrototypes */
 
+/* Hook prototypes */
+void vApplicationStackOverflowHook(xTaskHandle xTask, signed char *pcTaskName);
+
+/* USER CODE BEGIN 4 */
+/* vApplicationStackOverflowHook() is defined in main_tasks.cpp, where it
+   records the task name and lights LD3. CubeMX generates an empty stub
+   for it here; leave this block without one, or the link fails on a
+   duplicate definition. CubeMX keeps whatever is between these markers,
+   so regeneration does not bring the stub back. */
+/* USER CODE END 4 */
+
 /* Private application code --------------------------------------------------*/
 /* USER CODE BEGIN Application */
 

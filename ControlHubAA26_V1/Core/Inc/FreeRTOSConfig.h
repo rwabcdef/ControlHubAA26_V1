@@ -74,6 +74,7 @@
 #define configUSE_16_BIT_TICKS                   0
 #define configUSE_MUTEXES                        1
 #define configQUEUE_REGISTRY_SIZE                8
+#define configCHECK_FOR_STACK_OVERFLOW           2
 #define configUSE_RECURSIVE_MUTEXES              1
 #define configUSE_COUNTING_SEMAPHORES            1
 #define configUSE_PORT_OPTIMISED_TASK_SELECTION  0
@@ -168,6 +169,14 @@ standard names. */
 
 /* USER CODE BEGIN Defines */
 /* Section where parameter definitions can be added (for instance, to override default ones in FreeRTOS.h) */
+
+/* configCHECK_FOR_STACK_OVERFLOW is set in the .ioc (method 2): at every
+   context switch the kernel checks that the last 16 bytes of the outgoing
+   task's stack still hold the 0xA5 fill, and calls
+   vApplicationStackOverflowHook() if not. The hook is in main_tasks.cpp;
+   the stub CubeMX generates for it in freertos.c is removed there, inside
+   USER CODE 4. */
+
 /* USER CODE END Defines */
 
 #endif /* FREERTOS_CONFIG_H */

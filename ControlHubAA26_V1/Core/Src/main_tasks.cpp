@@ -14,6 +14,8 @@
  DBG00T347005hello   # will produce std ack
 
  DBG00T349002R2      # will produce ack with data "OK" (from: debugSockInstantHandler())
+ DBG00T349003S00     # task 00 stack: name and lowest free bytes, e.g. "writer0Task:0412"
+ DBG00T349002SL      # the task with the least stack free, same format
 
  # led socket - relayed to the radio, and ultimatelty to the remote hub (arduino uno r4)
 LED01U492002A1
@@ -81,7 +83,7 @@ TACHOU001011R0432.00017   # 432 RPM, 17 glitches rejected since boot.
 osThreadId_t writer0TaskHandle;
 const osThreadAttr_t writer0Task_attributes = {
   .name = "writer0Task",
-  .stack_size = 512 * 4,
+  .stack_size = 256 * 4,
   .priority = (osPriority_t) osPriorityNormal,
 };
 
@@ -89,7 +91,7 @@ const osThreadAttr_t writer0Task_attributes = {
 osThreadId_t reader0TaskHandle;
 const osThreadAttr_t reader0Task_attributes = {
   .name = "reader0Task",
-  .stack_size = 512 * 4,
+  .stack_size = 256 * 4,
   .priority = (osPriority_t) osPriorityNormal,
 };
 
@@ -97,7 +99,7 @@ const osThreadAttr_t reader0Task_attributes = {
 osThreadId_t serLink0TaskHandle;
 const osThreadAttr_t serLink0Task_attributes = {
   .name = "serLink0Task",
-  .stack_size = 512 * 4,
+  .stack_size = 256 * 4,
   .priority = (osPriority_t) osPriorityNormal,
 };
 
@@ -113,7 +115,7 @@ const osThreadAttr_t ledTask_attributes = {
 osThreadId_t radioRxTaskHandle;
 const osThreadAttr_t radioRxTask_attributes = {
   .name = "radioRxTask",
-  .stack_size = 512 * 4,
+  .stack_size = 256 * 4,
   .priority = (osPriority_t) osPriorityNormal,
 };
 
@@ -121,7 +123,7 @@ const osThreadAttr_t radioRxTask_attributes = {
 osThreadId_t radioTxTaskHandle;
 const osThreadAttr_t radioTxTask_attributes = {
   .name = "radioTxTask",
-  .stack_size = 512 * 4,
+  .stack_size = 256 * 4,
   .priority = (osPriority_t) osPriorityNormal,
 };
 
@@ -129,7 +131,7 @@ const osThreadAttr_t radioTxTask_attributes = {
 osThreadId_t writer1TaskHandle;
 const osThreadAttr_t writer1Task_attributes = {
   .name = "writer1Task",
-  .stack_size = 512 * 4,
+  .stack_size = 256 * 4,
   .priority = (osPriority_t) osPriorityNormal,
 };
 
@@ -137,7 +139,7 @@ const osThreadAttr_t writer1Task_attributes = {
 osThreadId_t reader1TaskHandle;
 const osThreadAttr_t reader1Task_attributes = {
   .name = "reader1Task",
-  .stack_size = 512 * 4,
+  .stack_size = 256 * 4,
   .priority = (osPriority_t) osPriorityNormal,
 };
 
@@ -145,7 +147,7 @@ const osThreadAttr_t reader1Task_attributes = {
 osThreadId_t serLink1TaskHandle;
 const osThreadAttr_t serLink1Task_attributes = {
   .name = "serLink1Task",
-  .stack_size = 512 * 4,
+  .stack_size = 256 * 4,
   .priority = (osPriority_t) osPriorityNormal,
 };
 
@@ -153,7 +155,7 @@ const osThreadAttr_t serLink1Task_attributes = {
 osThreadId_t radio1TaskHandle;
 const osThreadAttr_t radio1Task_attributes = {
   .name = "radio1Task",
-  .stack_size = 512 * 4,
+  .stack_size = 256 * 4,
   .priority = (osPriority_t) osPriorityNormal,
 };
 
@@ -161,7 +163,7 @@ const osThreadAttr_t radio1Task_attributes = {
 osThreadId_t mqttTaskHandle;
 const osThreadAttr_t mqttTask_attributes = {
   .name = "mqttTask",
-  .stack_size = 512 * 4,
+  .stack_size = 256 * 4,
   .priority = (osPriority_t) osPriorityNormal,
 };
 
@@ -169,7 +171,7 @@ const osThreadAttr_t mqttTask_attributes = {
 osThreadId_t mqttRxTaskHandle;
 const osThreadAttr_t mqttRxTask_attributes = {
   .name = "mqttRxTask",
-  .stack_size = 512 * 4,
+  .stack_size = 256 * 4,
   .priority = (osPriority_t) osPriorityNormal,
 };
 
@@ -177,7 +179,7 @@ const osThreadAttr_t mqttRxTask_attributes = {
 osThreadId_t relayTaskHandle;
 const osThreadAttr_t relayTask_attributes = {
   .name = "relayTask",
-  .stack_size = 512 * 4,
+  .stack_size = 256 * 4,
   .priority = (osPriority_t) osPriorityNormal,
 };
 
@@ -219,7 +221,7 @@ const osThreadAttr_t controlBTask_attributes = {
 osThreadId_t mqtt2TaskHandle;
 const osThreadAttr_t mqtt2Task_attributes = {
   .name = "mqtt2Task",
-  .stack_size = 512 * 4,
+  .stack_size = 256 * 4,
   .priority = (osPriority_t) osPriorityNormal,
 };
 
@@ -939,8 +941,8 @@ void startMotorTask(void *argument)
 {
   osDelay(MOTOR_START_DELAY_MS);
 
-  motorB.setPercent(MOTORB_START_PERCENT);
-  motorB.setDirection(TC78H611FNG::reverse);
+  // motorB.setPercent(MOTORB_START_PERCENT);
+  // motorB.setDirection(TC78H611FNG::reverse);
 
   /* Nothing further to do. INCLUDE_vTaskDelete is on, so give the stack
      back rather than parking the task in an empty loop for ever. The
@@ -1856,15 +1858,211 @@ extern "C" void HAL_GPIO_EXTI_Callback(uint16_t GPIO_Pin)
 }
 
 //--------------------------------------------------------------
+// Stack overflow - enabled by configCHECK_FOR_STACK_OVERFLOW (method 2),
+// set in the .ioc. CubeMX also generates an empty stub of this hook in
+// freertos.c's USER CODE 4 block; that stub is removed, and must stay
+// removed or the link fails on a duplicate definition.
+//
+// Called by the kernel from the context switch (PendSV), with the
+// offending task's stack already corrupt, so nothing here may use the
+// RTOS, the HAL or much stack. It records which task it was, turns LD3
+// (red, PB14) on solid and stops.
+//
+// Solid, not flashing, to tell it apart from Error_Handler() in main.c,
+// which flashes the same LED. In the debugger, stackOverflowTaskName
+// names the task; raise that task's .stack_size and check the others
+// with the DBG00 stack query.
+//
+// extern "C" for the same reason as HAL_GPIO_EXTI_Callback: FreeRTOS
+// calls it by its C name.
+volatile char stackOverflowTaskName[configMAX_TASK_NAME_LEN];
+
+extern "C" void vApplicationStackOverflowHook(TaskHandle_t xTask, char* pcTaskName)
+{
+  (void)xTask;
+
+  taskDISABLE_INTERRUPTS();
+
+  /* The name lives in the TCB, not on the stack, so it is still intact.
+     Copied by hand: this is no place to call into the C library. */
+  for(uint8_t i = 0U; i < configMAX_TASK_NAME_LEN; i++)
+  {
+    stackOverflowTaskName[i] = pcTaskName[i];
+    if(pcTaskName[i] == '\0')
+    {
+      break;
+    }
+  }
+
+  /* By register, like Error_Handler(). MX_GPIO_Init() has configured PB14
+     as an output long before any task runs. */
+  LD3_GPIO_Port->BSRR = LD3_Pin;
+
+  for(;;)
+  {
+  }
+}
+
+//--------------------------------------------------------------
+// DBG00 socket - reads, answered on the ack:
+//
+//   DBG00T349001R    ->  DBG00A349002OK              link check
+//   DBG00T349003S00  ->  DBG00A349016reader0Task:0412  task 00: name and
+//                                                  its stack's all-time
+//                                                  lowest free space, in
+//                                                  bytes (4 digits)
+//   DBG00T349003S99  ->  DBG00A349003END           index past the last task
+//   DBG00T349002SL   ->  DBG00A349015mqttRxTask:0096   the task with the
+//                                                  least free, same format
+//
+// Step S00, S01, ... until END to list every task, the kernel's own
+// (IDLE, Tmr Svc, tcpip_thread, ...) included. Tasks are numbered in
+// creation order, so an index names the same task on every call.
+//
+// "Lowest free" is uxTaskGetStackHighWaterMark(): the least the stack has
+// ever had spare since the task started - a record, not a snapshot. Run
+// the board through everything (MQTT, radio, closed loop, serial traffic)
+// before trusting it. Under ~100 bytes is too tight: an interrupt landing
+// in a task that has used the FPU stacks 100+ bytes of FPU context on top.
+
+// Bigger than the number of tasks this build creates (about 23). If it is
+// ever exceeded, uxTaskGetSystemState() returns 0 and the query answers
+// ERR rather than a wrong list.
+#define DEBUG_MAX_TASKS 32U
+
+#define DEBUG_STACK_FIELD_WIDTH 4U   // bytes; the biggest stack is 2048
+
+// File scope, not on reader0Task's stack - at ~40 bytes a task it would
+// take most of it. Shared by reader0Task and reader1Task (both run this
+// handler), which is why stackQuery() fills and reads it with the
+// scheduler suspended.
+static TaskStatus_t debugTaskStatus[DEBUG_MAX_TASKS];
+
+// Writes "<name>:<dddd>" for one task into data, returns its length.
+// Name is at most configMAX_TASK_NAME_LEN - 1 = 15 characters, so this
+// is at most 20, well inside Frame::MAX_DATALEN.
+static uint16_t formatTaskStack(const TaskStatus_t* status, char* data)
+{
+  uint16_t len = 0U;
+
+  for(const char* p = status->pcTaskName;
+      (*p != '\0') && (len < (configMAX_TASK_NAME_LEN - 1U)); p++)
+  {
+    data[len++] = *p;
+  }
+  data[len++] = ':';
+
+  /* usStackHighWaterMark is in StackType_t words. */
+  uint32_t freeBytes = (uint32_t)status->usStackHighWaterMark * sizeof(StackType_t);
+  if(freeBytes > 9999U)
+  {
+    freeBytes = 9999U;
+  }
+  writeUintField(freeBytes, DEBUG_STACK_FIELD_WIDTH, &data[len]);
+
+  return (uint16_t)(len + DEBUG_STACK_FIELD_WIDTH);
+}
+
+static uint16_t copyReply(const char* text, char* data)
+{
+  uint16_t len = (uint16_t)strlen(text);
+  memcpy(data, text, len);
+  return len;
+}
+
+// command is "L" (least free) or two digits (task index).
+static uint16_t stackQuery(const char* command, uint16_t commandLen, char* data)
+{
+  uint32_t index = 0U;
+  bool least = (commandLen == 1U) && (command[0] == 'L');
+
+  if(!least && !((commandLen == 2U) && readUintField(command, 2U, &index)))
+  {
+    return copyReply("ERR", data);
+  }
+
+  uint16_t len;
+
+  /* Suspended, not in a critical section: uxTaskGetSystemState() scans
+     every task's stack for its high water mark, which is too long to run
+     with interrupts off - the tacho edges and uart2 must keep coming. */
+  vTaskSuspendAll();
+  {
+    UBaseType_t count = uxTaskGetSystemState(debugTaskStatus, DEBUG_MAX_TASKS, nullptr);
+
+    if(count == 0U)
+    {
+      len = copyReply("ERR", data);
+    }
+    else if(least)
+    {
+      UBaseType_t lowest = 0U;
+      for(UBaseType_t i = 1U; i < count; i++)
+      {
+        if(debugTaskStatus[i].usStackHighWaterMark < debugTaskStatus[lowest].usStackHighWaterMark)
+        {
+          lowest = i;
+        }
+      }
+      len = formatTaskStack(&debugTaskStatus[lowest], data);
+    }
+    else
+    {
+      /* The kernel lists tasks by state, so the array order changes as
+         they block and wake. Order by creation number instead, which is
+         fixed: select the index-th smallest xTaskNumber. Selection, not a
+         sort, because only one entry is wanted and count is small. */
+      const TaskStatus_t* found = nullptr;
+      uint32_t previous = 0U;
+      bool first = true;
+
+      for(uint32_t n = 0U; n <= index; n++)
+      {
+        found = nullptr;
+        for(UBaseType_t i = 0U; i < count; i++)
+        {
+          uint32_t number = debugTaskStatus[i].xTaskNumber;
+          if((first || (number > previous)) &&
+             ((found == nullptr) || (number < found->xTaskNumber)))
+          {
+            found = &debugTaskStatus[i];
+          }
+        }
+        if(found == nullptr)
+        {
+          break;   // fewer tasks than index + 1
+        }
+        previous = found->xTaskNumber;
+        first = false;
+      }
+
+      len = (found != nullptr) ? formatTaskStack(found, data)
+                               : copyReply("END", data);
+    }
+  }
+  (void)xTaskResumeAll();
+
+  return len;
+}
+
 bool debugSockInstantHandler(SerLink::Frame &rxFrame, uint16_t* dataLen, char* data)
 {
-  uint8_t index = 0;
-  if(rxFrame.data[index++] == 'R')
+  if(rxFrame.dataLen < 1)
   {
-    memset(data, 0, 10); // clear outgoing buffer
-    strncpy(data, "OK", 2);
-    *dataLen = 2;
-    return true;
+    return false;
   }
-  return false; // not handled
+
+  switch(rxFrame.data[0])
+  {
+    case 'R':
+      *dataLen = copyReply("OK", data);
+      return true;
+
+    case 'S':
+      *dataLen = stackQuery(&rxFrame.data[1], (uint16_t)(rxFrame.dataLen - 1), data);
+      return true;
+
+    default:
+      return false; // not handled
+  }
 }
