@@ -7,6 +7,29 @@
  *                 --> GPIO EXTI falling edge --> read TIM5->CNT --> queue
  *                 --> drained by the control task, turned into RPM
  *
+ * Edge filtering
+ * --------------
+ * onEdge() accepts a falling edge only if it passes three checks:
+ *
+ *   1. The pin still reads low in the ISR - rejects spikes on a high line
+ *      that have gone by the time the ISR looks.
+ *   2. The line has been seen high since the last accepted edge ("armed")
+ *      - rejects spikes on a LOW line. The low state is held only by the
+ *      level shifter's ~8.8k divider, so motor PWM spikes lift it briefly
+ *      and each falls back as a fresh falling edge with the pin still low,
+ *      which check 1 cannot see. At 30% duty these arrived several ms
+ *      after the real edge and read as extra revolutions (348 RPM showing
+ *      as 390, 464, 570). The EXTI interrupts on both edges so that the
+ *      rising one, the magnet leaving, can re-arm.
+ *   3. At least TACHO__MIN_EDGE_TICKS since the last accepted edge -
+ *      rejects chatter on the real edge, where a spike can re-arm and
+ *      then re-trigger within a few hundred us.
+ *
+ * Hardware filtering on PF4 (a 2200 pF cap to ground) reduces how much
+ * of this reaches the pin. Much larger is worse, not better: the falling
+ * edge discharges only through the ~8.8k divider, and 0.1 uF made it slow
+ * enough for noise to cross the input threshold several times.
+ *
  * Why a free running counter and not a 10 kHz tick ISR
  * ---------------------------------------------------
  * The timestamp comes from TIM5 running free at TICK_HZ with no interrupt
@@ -145,8 +168,13 @@ class Tachometer
     // Total whole revolutions since init().
     uint32_t getRevolutions() const;
 
-    // Diagnostics: edges rejected by the glitch guard, and edges lost to
-    // a full queue. Both should stay at zero in normal running.
+    // Diagnostics: low-reading edges rejected by the arming check or
+    // TACHO__MIN_EDGE_TICKS, and edges lost to a full queue. Spikes on a
+    // high line are not counted - they cannot be told apart from real
+    // rising edges, which take the same path. The glitch count rising
+    // with motor duty means PWM noise is reaching the pin; it only
+    // matters if the reading moves with it. Dropped edges should stay
+    // at zero.
     uint16_t getGlitchCount() const;
     uint16_t getDroppedEdges() const;
 
@@ -170,6 +198,10 @@ class Tachometer
     // ISR side: the previous accepted edge, for the glitch guard.
     volatile uint32_t lastEdgeTick;
     volatile bool     hasLastEdge;
+
+    // ISR side: true once the line has been seen high since the last
+    // accepted edge. Cleared by accepting one. See "Edge filtering".
+    volatile bool     armed;
     volatile uint16_t glitchCount;
     volatile uint16_t droppedEdges;
 

@@ -76,6 +76,7 @@ Tachometer::Tachometer(TIM_TypeDef* timebase, GPIO_TypeDef* port, uint16_t pin)
     queueStorageArea(),
     lastEdgeTick(0U),
     hasLastEdge(false),
+    armed(false),
     glitchCount(0U),
     droppedEdges(0U),
     rpm(0U),
@@ -176,10 +177,12 @@ bool Tachometer::startPin()
      line, is already clocked by HAL_MspInit() in stm32f4xx_hal_msp.c. */
   GPIO_InitTypeDef gpioInit = {};
   gpioInit.Pin = pin;
-  gpioInit.Mode = GPIO_MODE_IT_FALLING;
+  gpioInit.Mode = GPIO_MODE_IT_RISING_FALLING;
 
   /* The magnet pulls the 3144 open collector output low, so the line
-     idles high and the falling edge is the magnet arriving.
+     idles high and the falling edge is the magnet arriving. Both edges
+     interrupt: the rising one, the magnet leaving, is what re-arms the
+     input - see armed in Tachometer.hpp.
 
      No internal pull-up. The level shifter is a BC182L emitter follower
      (collector at 12 V) into a 33k/12k divider, with PF4 on the tap. It
@@ -201,6 +204,11 @@ bool Tachometer::startPin()
   __HAL_GPIO_EXTI_CLEAR_IT(pin);
   HAL_NVIC_ClearPendingIRQ(irqn);
 
+  /* Start armed only if no magnet is over the sensor now. If one is, the
+     line is already low and its falling edge was missed; waiting for it
+     to go high first stops noise on that low from counting as an edge. */
+  armed = ((port->IDR & pin) != 0U);
+
   HAL_NVIC_SetPriority(irqn, TACHO__EXTI_PRIORITY, 0);
   HAL_NVIC_EnableIRQ(irqn);
 
@@ -219,8 +227,27 @@ void Tachometer::onEdge()
      still low and a spike has already let go. The divider feeding PF4 is
      ~8.8k in both states, so the line picks such spikes up readily, and
      EXTI latches ones far too short for a scope at 100 ms/div to show.
-     Read IDR directly: this is the ISR hot path. */
+     Read IDR directly: this is the ISR hot path.
+
+     Both edges land here and EXTI does not say which one fired, so the
+     level is the only thing to go on. High means the magnet has gone, or
+     a spike on a high line has already recovered - either way the line
+     is idle, and the next falling edge may count. Not a glitch: every
+     real rising edge takes this path. */
   if((port->IDR & pin) != 0U)
+  {
+    armed = true;
+    return;
+  }
+
+  /* Low, but the line has not been seen high since the last accepted
+     edge. The low state is only the ~8.8k divider holding the pin down,
+     so motor PWM spikes lift it briefly and each one falls back as a new
+     falling edge while the pin still reads low - which the level check
+     above cannot catch. At 30% duty these came through several ms after
+     the real edge, past TACHO__MIN_EDGE_TICKS, and read as extra
+     revolutions. A magnet cannot arrive twice without leaving between. */
+  if(!armed)
   {
     glitchCount++;
     return;
@@ -235,6 +262,7 @@ void Tachometer::onEdge()
 
   lastEdgeTick = now;
   hasLastEdge = true;
+  armed = false;
 
   BaseType_t higherPriorityTaskWoken = pdFALSE;
   if(xQueueSendFromISR(queue, &now, &higherPriorityTaskWoken) != pdTRUE)

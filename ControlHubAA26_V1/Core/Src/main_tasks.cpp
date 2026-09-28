@@ -36,7 +36,8 @@ ADC00T529002GA      # all four channels, raw
 # Tacho socket - motorB speed in RPM, published unsolicited by controlBTask
 # every TACHO_PUBLISH_PERIOD_MS. Transmit only, so there is nothing to type -
 # this is what appears in the terminal:
-TACHOU001005R0432   # 432 RPM. 'U', so the board expects no ack back
+TACHOU001011R0432.00017   # 432 RPM, 17 glitches rejected since boot.
+                          # 'U', so the board expects no ack back
 
  */
 
@@ -372,7 +373,8 @@ SerLink::Socket* motorSocket = nullptr;
 // clear of the 1.8 V VIH of a 3.3 V input. The line idles high and each
 // magnet gives one falling edge, so two per revolution.
 //
-//   PF4  GPIO EXTI4 (falling)  CN12 pin 38  <- level shifter output
+//   PF4  GPIO EXTI4 (both)     CN12 pin 38  <- level shifter output
+//                                            2200 pF to GND at the pin
 //   GND                        CN12 pin 39  <- sensor return
 //
 // PF4 puts the sensor on the same morpho connector as the motor it
@@ -410,6 +412,10 @@ Tachometer tachoB(TIM5, GPIOF, TACHOB_PIN);
 // control loop.
 #define TACHO_PUBLISH_PERIOD_MS 2000
 #define TACHO_RPM_FIELD_WIDTH   4U
+
+// Glitch count, after a '.' separator. getGlitchCount() is a uint16_t, so
+// five digits hold its whole range and no clamp is needed.
+#define TACHO_GLITCH_FIELD_WIDTH 5U
 
 // controlBTask publishes on a whole number of its own passes rather than
 // keeping a second timebase, so the two periods have to divide.
@@ -1193,7 +1199,7 @@ void startControlBTask(void *argument)
   const uint32_t publishEvery = TACHO_PUBLISH_PERIOD_MS / CONTROLB_PERIOD_MS;
   uint32_t passes = 0U;
 
-  char speedData[1U + TACHO_RPM_FIELD_WIDTH];
+  char speedData[1U + TACHO_RPM_FIELD_WIDTH + 1U + TACHO_GLITCH_FIELD_WIDTH];
 
   for(;;)
   {
@@ -1232,6 +1238,13 @@ void startControlBTask(void *argument)
 
         speedData[0] = 'R';
         writeUintField(rpmField, TACHO_RPM_FIELD_WIDTH, &speedData[1]);
+
+        /* Edges rejected by the ISR's filters since init() - see
+           Tachometer::onEdge(). Climbing with duty cycle means PWM noise
+           is reaching PF4. */
+        speedData[1U + TACHO_RPM_FIELD_WIDTH] = '.';
+        writeUintField(tachoB.getGlitchCount(), TACHO_GLITCH_FIELD_WIDTH,
+          &speedData[2U + TACHO_RPM_FIELD_WIDTH]);
 
         /* Non-blocking, and fire and forget. */
         tachoSocket->sendData(speedData, (uint16_t)sizeof(speedData), false);
@@ -1588,7 +1601,8 @@ static uint16_t bytesToHex(const uint8_t* src, uint8_t srcLen, char* dst)
    at or below configLIBRARY_MAX_SYSCALL_INTERRUPT_PRIORITY, so the
    FromISR call inside onIrq() is legal.
 
-   EXTI4 fires for the motorB tachometer (PF4, falling edge). That pin is
+   EXTI4 fires for the motorB tachometer (PF4, both edges - the rising
+   one re-arms the input, see Tachometer.hpp). That pin is
    not in the .ioc, so its vector is hand written in stm32f4xx_it.c and
    Tachometer::init() sets the same priority 7, for the same reason.
 
