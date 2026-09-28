@@ -29,5 +29,11 @@
  #define WRITER_CONFIG__WRITER1_ID 2 // WRITER1 instance id
  //----------------------------------------------------------
 
+ //----------------------------------------------------------
+ // WRITER2 - SerLink2, over MQTT. Its link is the writeData function
+ // passed to init() (SerLinkMqttAdapter::write()), so no switch either.
+ #define WRITER_CONFIG__WRITER2_ID 3 // WRITER2 instance id
+ //----------------------------------------------------------
+
  #endif /* WRITER_CONFIG_HPP_ */
  

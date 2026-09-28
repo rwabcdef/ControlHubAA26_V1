@@ -79,6 +79,22 @@ TACHOU001011R0432.00017   # 432 RPM, 17 glitches rejected since boot.
 #include "lwip/netif.h"
 
 //--------------------------------------------------------------
+// Task stacks are 256 words (1 KB) except where noted. The exceptions:
+//
+// MQTT_TASK_STACK_SIZE - every task that calls into lwIP's MQTT client:
+// mqttTask, mqttRxTask, mqtt2Task, writer2Task and reader2Task (the last
+// two through SerLinkMqttAdapter::write()). MqttPubSub takes the tcpip
+// core lock and runs lwIP on the CALLER's stack, not the tcpip thread's,
+// so a publish drags the whole send path along with it: mqtt_publish ->
+// tcp_write -> tcp_output -> ip4_output -> etharp -> ethernet_output ->
+// low_level_output -> HAL ETH, about 700 bytes at -O0 before the caller's
+// own frames, and an interrupt's saved FPU context, are added. 1 KB
+// overflowed within seconds of reset; this is the 2 KB they had before.
+//
+// Check with the DBG00 stack query (DBG00T349002SL) before trimming.
+#define MQTT_TASK_STACK_SIZE (512 * 4)
+
+//--------------------------------------------------------------
 /* Definitions for writer0Task */
 osThreadId_t writer0TaskHandle;
 const osThreadAttr_t writer0Task_attributes = {
@@ -163,7 +179,7 @@ const osThreadAttr_t radio1Task_attributes = {
 osThreadId_t mqttTaskHandle;
 const osThreadAttr_t mqttTask_attributes = {
   .name = "mqttTask",
-  .stack_size = 256 * 4,
+  .stack_size = MQTT_TASK_STACK_SIZE,
   .priority = (osPriority_t) osPriorityNormal,
 };
 
@@ -171,7 +187,7 @@ const osThreadAttr_t mqttTask_attributes = {
 osThreadId_t mqttRxTaskHandle;
 const osThreadAttr_t mqttRxTask_attributes = {
   .name = "mqttRxTask",
-  .stack_size = 256 * 4,
+  .stack_size = MQTT_TASK_STACK_SIZE,
   .priority = (osPriority_t) osPriorityNormal,
 };
 
@@ -221,6 +237,29 @@ const osThreadAttr_t controlBTask_attributes = {
 osThreadId_t mqtt2TaskHandle;
 const osThreadAttr_t mqtt2Task_attributes = {
   .name = "mqtt2Task",
+  .stack_size = MQTT_TASK_STACK_SIZE,
+  .priority = (osPriority_t) osPriorityNormal,
+};
+
+/* Definitions for writer2Task, reader2Task and serLink2Task - SerLink2,
+   the same stack as SerLink0/1, carried by mqtt2. */
+osThreadId_t writer2TaskHandle;
+const osThreadAttr_t writer2Task_attributes = {
+  .name = "writer2Task",
+  .stack_size = MQTT_TASK_STACK_SIZE,
+  .priority = (osPriority_t) osPriorityNormal,
+};
+
+osThreadId_t reader2TaskHandle;
+const osThreadAttr_t reader2Task_attributes = {
+  .name = "reader2Task",
+  .stack_size = MQTT_TASK_STACK_SIZE,
+  .priority = (osPriority_t) osPriorityNormal,
+};
+
+osThreadId_t serLink2TaskHandle;
+const osThreadAttr_t serLink2Task_attributes = {
+  .name = "serLink2Task",
   .stack_size = 256 * 4,
   .priority = (osPriority_t) osPriorityNormal,
 };
@@ -243,6 +282,9 @@ void startMotorTask(void *argument);
 void startAdcTask(void *argument);
 void startControlBTask(void *argument);
 void startMqtt2Task(void *argument);
+void startWriter2Task(void *argument);
+void startReader2Task(void *argument);
+void startSerLink2Task(void *argument);
 
 bool debugSockInstantHandler(SerLink::Frame &rxFrame, uint16_t* dataLen, char* data);
 
@@ -507,10 +549,17 @@ static const ControllerConfig controllerBConfig =
 
 Controller controllerB(controllerBConfig);
 
-// Acquired on transport0 (uart2). Speed demands for the controllers -
-// the MOTOR socket keeps its own speed set for now, but this is the one
-// to use.
+// CTRL0 - speed demands for the controllers. The MOTOR socket keeps its
+// own speed set for now, but this is the one to use. Two sockets, one
+// per link, sharing the same handlers (see the CTRL0 section):
+//
+//   controlSocket      transport0 - SerLink0, serial (uart2)
+//   controlMqttSocket  transport2 - SerLink2, MQTT (mqtt2)
+//
+// Both drive the same controllerB, so the last command from either link
+// wins. controlBTask sends its status frame on both.
 SerLink::Socket* controlSocket = nullptr;
+SerLink::Socket* controlMqttSocket = nullptr;
 
 //--------------------------------------------------------------
 // Analog inputs - ADC1, four ranks, scanned continuously into a circular
@@ -638,6 +687,34 @@ MqttPubSub mqtt2Client(MQTT_BROKER_IP, MQTT_BROKER_PORT, MQTT2_CLIENT_ID);
 SerLinkMqttAdapter mqtt2(&mqtt2Client, MQTT2_TOPIC_UP, MQTT2_TOPIC_DOWN);
 
 //--------------------------------------------------------------
+// SerLink2 - the same stack as SerLink0 and SerLink1, over mqtt2.
+//
+//   reader2 takes received frames from mqtt2.rxDataQueue and sends its
+//           acks with mqtt2.write() (Reader::setAckWriteFunc()).
+//   writer2 sends frames with mqtt2.write().
+//
+// Both call write() from their own tasks, which SerLinkMqttAdapter allows:
+// the publish takes lwIP's core lock itself. See SerLinkMqttAdapter.hpp.
+//
+// Sockets: DBG00 (link check, stack query) and CTRL0 (speed controller),
+// sharing their handlers with SerLink0 - a socket belongs to one
+// transport, a handler does not. So CTRL0 over MQTT and CTRL0 over uart2
+// drive the same controllerB, and the last command from either wins.
+//
+// The whole stack is idle until mqtt2 connects: until then nothing
+// arrives on rxDataQueue, and write() refuses, so the CTRL0 status frame
+// is dropped rather than queued up.
+SerLink::Writer writer2(WRITER_CONFIG__WRITER2_ID);
+SerLink::Reader reader2(READER_CONFIG__READER2_ID);
+
+#define TRANSPORT2_QUEUE_LENGTH 5
+StaticQueue_t transport2StaticQueue;
+uint8_t transport2QueueStorageArea[TRANSPORT2_QUEUE_LENGTH * sizeof(SerLink::FrameMsg)];
+QueueHandle_t transport2Queue;
+
+SerLink::Transport transport2(&writer2, &reader2);
+
+//--------------------------------------------------------------
 void initTasks()
 {
   // Created synchronously here (rather than inside startSerLink0Task) so
@@ -747,14 +824,33 @@ void initTasks()
   /* The SerLink2 link layer. init() creates mqtt2's frame queue and
      mqtt2Client's rxQueue and touches no lwIP, so it belongs here; the
      connection itself cannot start until MX_LWIP_Init() has run, and so
-     happens in startMqtt2Task.
-
-     Nothing consumes mqtt2.rxDataQueue yet - reader2, writer2 and
-     transport2 are not built. Until they are, this brings the link up and
-     counts what arrives, which is what makes it testable on its own. */
+     happens in startMqtt2Task. */
   mqtt2.init();
 
   mqtt2TaskHandle = osThreadNew(startMqtt2Task, NULL, &mqtt2Task_attributes);
+
+  /* SerLink2, on top of mqtt2. Same order as SerLink0: the transport's
+     queue first, then its sockets, then the reader and writer, all before
+     the scheduler - so no task sees a half built socket table.
+
+     After mqtt2.init(), which is what creates the rxDataQueue reader2 is
+     handed. The sockets are acquired here rather than from serLink2Task
+     (as SerLink0/1 do with DBG00) for the same reason. */
+  transport2Queue = xQueueCreateStatic(TRANSPORT2_QUEUE_LENGTH, sizeof(SerLink::FrameMsg),
+    transport2QueueStorageArea, &transport2StaticQueue);
+  transport2.init(transport2Queue);
+
+  transport2.acquireSocket("DBG00", nullptr, debugSockInstantHandler);
+  controlMqttSocket = transport2.acquireSocket("CTRL0", controlSockReceiveHandler,
+    controlSockInstantHandler);
+
+  writer2.init([](char* buffer) -> uint8_t { return mqtt2.write(buffer); });
+  reader2.init(mqtt2.rxDataQueue, &writer2, transport2.queue);
+  reader2.setAckWriteFunc([](char* buffer) -> uint8_t { return mqtt2.write(buffer); });
+
+  writer2TaskHandle = osThreadNew(startWriter2Task, NULL, &writer2Task_attributes);
+  reader2TaskHandle = osThreadNew(startReader2Task, NULL, &reader2Task_attributes);
+  serLink2TaskHandle = osThreadNew(startSerLink2Task, NULL, &serLink2Task_attributes);
 
   mqttTaskHandle = osThreadNew(startMqttTask, NULL, &mqttTask_attributes);
 
@@ -1447,19 +1543,25 @@ void startControlBTask(void *argument)
         rpmField = 9999U;
       }
 
+      /* <ppp>.<rrrr> - see the CTRL0 status frame. The duty cycle is the
+         motor's actual one, so it is right in open loop as well.
+         setPercent() clamps at 100, so three digits always fit. */
+      writeUintField(controllerB.getPwmPercent(), CONTROL_PWM_FIELD_WIDTH,
+        &statusData[0]);
+      statusData[CONTROL_PWM_FIELD_WIDTH] = '.';
+      writeUintField(rpmField, CONTROL_RPM_FIELD_WIDTH,
+        &statusData[CONTROL_PWM_FIELD_WIDTH + 1U]);
+
+      /* 'U': fire and forget, same reasoning as TACHO. Sent on both
+         links, uart2 and MQTT - over MQTT it is simply dropped while
+         mqtt2 is not connected. */
       if(controlSocket != nullptr)
       {
-        /* <ppp>.<rrrr> - see the CTRL0 status frame. The duty cycle is
-           the motor's actual one, so it is right in open loop as well.
-           setPercent() clamps at 100, so three digits always fit. */
-        writeUintField(controllerB.getPwmPercent(), CONTROL_PWM_FIELD_WIDTH,
-          &statusData[0]);
-        statusData[CONTROL_PWM_FIELD_WIDTH] = '.';
-        writeUintField(rpmField, CONTROL_RPM_FIELD_WIDTH,
-          &statusData[CONTROL_PWM_FIELD_WIDTH + 1U]);
-
-        /* 'U': fire and forget, same reasoning as TACHO. */
         controlSocket->sendData(statusData, (uint16_t)sizeof(statusData), false);
+      }
+      if(controlMqttSocket != nullptr)
+      {
+        controlMqttSocket->sendData(statusData, (uint16_t)sizeof(statusData), false);
       }
 
       if(tachoSocket != nullptr)
@@ -1635,6 +1737,33 @@ void startMqtt2Task(void *argument)
   for(;;)
   {
     mqtt2.run();
+  }
+}
+
+//--------------------------------------------------------------
+// SerLink2: the same stack as SerLink0, carried by mqtt2 instead of
+// uart2. Everything was set up in initTasks(), sockets included.
+void startWriter2Task(void *argument)
+{
+  for(;;)
+  {
+    writer2.run();
+  }
+}
+
+void startReader2Task(void *argument)
+{
+  for(;;)
+  {
+    reader2.run();
+  }
+}
+
+void startSerLink2Task(void *argument)
+{
+  for(;;)
+  {
+    transport2.run();
   }
 }
 
@@ -1897,6 +2026,29 @@ extern "C" void vApplicationStackOverflowHook(TaskHandle_t xTask, char* pcTaskNa
   /* By register, like Error_Handler(). MX_GPIO_Init() has configured PB14
      as an output long before any task runs. */
   LD3_GPIO_Port->BSRR = LD3_Pin;
+
+  /* And name the task on the serial console, so no debugger is needed.
+     Straight to the USART2 registers, polling: with interrupts off and
+     the scheduler stuck, neither the uart2 driver nor HAL_UART can run.
+     USART2 is already configured by MX_USART2_UART_Init(). Any frame the
+     driver was part way through sending is cut short - hence the leading
+     CR LF, to start on a clean line. */
+  static const char prefix[] = "\r\nSTACK OVERFLOW: ";
+  for(const char* p = prefix; *p != '\0'; p++)
+  {
+    while((USART2->SR & USART_SR_TXE) == 0U) { }
+    USART2->DR = (uint8_t)*p;
+  }
+  for(uint8_t i = 0U; (i < configMAX_TASK_NAME_LEN) && (stackOverflowTaskName[i] != '\0'); i++)
+  {
+    while((USART2->SR & USART_SR_TXE) == 0U) { }
+    USART2->DR = (uint8_t)stackOverflowTaskName[i];
+  }
+  for(const char* p = "\r\n"; *p != '\0'; p++)
+  {
+    while((USART2->SR & USART_SR_TXE) == 0U) { }
+    USART2->DR = (uint8_t)*p;
+  }
 
   for(;;)
   {

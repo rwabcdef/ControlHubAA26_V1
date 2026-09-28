@@ -61,6 +61,12 @@
      // When set, acks go here as RadioMsg TX_DATA instead being sent by uart2_writeBlocking().
      QueueHandle_t ackTxQueue = nullptr;
 
+     // When set, acks are sent by calling this - the same kind of function a
+     // Writer sends its frames with. For a link with no queue of its own to
+     // post to, e.g. SerLinkMqttAdapter::write(). Takes precedence over
+     // ackTxQueue and uart2. See setAckWriteFunc().
+     WriteDataFunc ackWriteFunc = nullptr;
+
     //  char* rxBuffer;
     //  char* ackBuffer;
     //  uint8_t bufferLen;
@@ -108,6 +114,13 @@
     Reader(uint8_t id); // , DebugPrint* debugPrint = nullptr
    void init(QueueHandle_t uartRxQueue, Writer* writer = nullptr,
     QueueHandle_t consumerQueue = nullptr, QueueHandle_t ackTxQueue = nullptr);
+
+   // Sends acks through ackWrite instead of ackTxQueue or uart2 - for a link
+   // like MQTT, whose write is a direct call callable from this Reader's
+   // task. A setter rather than another init() parameter: an overload taking
+   // a function pointer where init() takes a QueueHandle_t would make a
+   // plain nullptr argument ambiguous. Call before the scheduler starts.
+   void setAckWriteFunc(WriteDataFunc ackWrite);
      void run();
      bool registerInstantCallback(char* protocol, readHandler handler);
      bool getRxFrame(Frame* rxFrame);

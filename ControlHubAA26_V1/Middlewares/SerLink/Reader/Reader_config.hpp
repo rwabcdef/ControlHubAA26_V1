@@ -28,4 +28,10 @@
 #define READER_CONFIG__READER1_ID 2 // READER1 instance id
 //----------------------------------------------------------
 
+//----------------------------------------------------------
+// READER2 - SerLink2, over MQTT. It sends acks through the function
+// passed to setAckWriteFunc(), so it has no READER_CONFIG__READER2 switch.
+#define READER_CONFIG__READER2_ID 3 // READER2 instance id
+//----------------------------------------------------------
+
 #endif /* READER_CONFIG_HPP_ */

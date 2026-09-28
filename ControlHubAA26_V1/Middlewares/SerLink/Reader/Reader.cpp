@@ -46,6 +46,11 @@ void Reader::init(QueueHandle_t uartRxQueue, Writer* writer, QueueHandle_t consu
   // constructor. Handlers may already be registered by this point.
 }
 
+void Reader::setAckWriteFunc(WriteDataFunc ackWrite)
+{
+  this->ackWriteFunc = ackWrite;
+}
+
 void Reader::run()
 {
   switch(this->currentState)
@@ -176,8 +181,13 @@ uint8_t Reader::txAck()
 
 uint8_t Reader::uartWrite(char* buffer)
 {
-  // Checked before the id mapping, so an instance with an external queue can
+  // Checked before the id mapping, so an instance with an external link can
   // never also write to a uart.
+  if(this->ackWriteFunc != nullptr)
+  {
+    return this->ackWriteFunc(buffer);
+  }
+
   if(this->ackTxQueue != nullptr)
   {
     return RadioMsg::queueTxData(this->ackTxQueue, buffer);

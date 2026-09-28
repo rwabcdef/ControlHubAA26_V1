@@ -42,8 +42,15 @@
 /* Time to block waiting for transmissions to finish */
 #define ETHIF_TX_TIMEOUT (2000U)
 /* USER CODE BEGIN OS_THREAD_STACK_SIZE_WITH_RTOS */
-/* Stack size of the interface thread */
-#define INTERFACE_THREAD_STACK_SIZE ( 350 )
+/* Stack size of the interface thread ("EthIf"), in BYTES - CMSIS-RTOS v2's
+   osThreadAttr_t.stack_size is bytes, not words. CubeMX's default of 350
+   was carried over from CMSIS v1, where it meant words (1400 bytes); as
+   bytes it overflowed within seconds of reset once
+   configCHECK_FOR_STACK_OVERFLOW was turned on, and had presumably been
+   silently corrupting the heap before that. 1024 matches lwIP's
+   DEFAULT_THREAD_STACKSIZE and TCPIP_THREAD_STACKSIZE in lwipopts.h.
+   Check with the DBG00 stack query (EthIf appears in the list). */
+#define INTERFACE_THREAD_STACK_SIZE ( 1024 )
 /* USER CODE END OS_THREAD_STACK_SIZE_WITH_RTOS */
 /* Network interface name */
 #define IFNAME0 's'
