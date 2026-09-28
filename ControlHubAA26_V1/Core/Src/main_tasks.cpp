@@ -31,6 +31,15 @@ MOTORT516006BS0300  # closed loop: hold 300 RPM (controllerB takes over)
 MOTORT529003BGS     # read the required RPM back, 4 digits
 
 # Control socket - speed controllers. controllerB drives motorB from tachoB.
+
+# start closed loop motor run
+CTRL0T523003BDF     # controllerB: direction forward
+CTRL0T516006BR0120  # controllerB: hold 120 RPM (enables closed loop)
+
+# end closed loop motor run
+CTRL0T516006BR0000
+CTRL0T523003BDD
+
 CTRL0T516006BR0120  # controllerB: hold 120 RPM (enables closed loop)
 CTRL0T523003BDF     # controllerB: direction forward
 CTRL0T523003BDR     # controllerB: direction reverse (F forward, D disabled)
