@@ -22,6 +22,8 @@ bool Controller::init()
   valid = (config.getRpm != nullptr) &&
           (config.getPwmPercent != nullptr) &&
           (config.setPwmPercent != nullptr) &&
+          (config.setDirection != nullptr) &&
+          (config.getDirection != nullptr) &&
           (config.outputMinPercent <= config.outputMaxPercent) &&
           (config.outputMaxPercent <= 100U);
 
@@ -107,6 +109,27 @@ void Controller::disable()
 bool Controller::isEnabled() const
 {
   return enabled;
+}
+
+void Controller::setDirection(ControllerDirection direction)
+{
+  /* Checked here rather than trusted: before init() has passed, the
+     callback may be null. */
+  if(valid)
+  {
+    config.setDirection(direction);
+  }
+}
+
+ControllerDirection Controller::getDirection() const
+{
+  /* Unusable config: report the one direction that means "not driving". */
+  return valid ? config.getDirection() : ControllerDirection::idle;
+}
+
+uint8_t Controller::getPwmPercent() const
+{
+  return valid ? config.getPwmPercent() : 0U;
 }
 
 uint8_t Controller::getOutputPercent() const

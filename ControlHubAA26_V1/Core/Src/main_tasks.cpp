@@ -28,6 +28,14 @@ MOTORT516005BP010
 MOTORT516006BS0300  # closed loop: hold 300 RPM (controllerB takes over)
 MOTORT529003BGS     # read the required RPM back, 4 digits
 
+# Control socket - speed controllers. controllerB drives motorB from tachoB.
+CTRL0T516006BR0120  # controllerB: hold 120 RPM (enables closed loop)
+CTRL0T523003BDF     # controllerB: direction forward
+CTRL0T523003BDR     # controllerB: direction reverse (F forward, D disabled)
+CTRL0T529003BGR     # read the required RPM back -> CTRL0A5290040120
+CTRL0T529003BGD     # read the direction back    -> CTRL0A529001R
+CTRL0U001008030.0350  # sent by the board: duty 30%, 350 RPM (no ack)
+
 # Adc socket - ADC1, ranks IN0/IN3/IN4/IN5 (PA0/PA3/PA4/PA5). Channel 1 is the motorB current sense.
 ADC00T529002G1      # raw count, 4 digits
 ADC00T529002V1      # millivolts, 4 digits
@@ -241,6 +249,11 @@ bool debugSockInstantHandler(SerLink::Frame &rxFrame, uint16_t* dataLen, char* d
 void motorSockReceiveHandler(const char* data, uint16_t dataLen);
 bool motorSockInstantHandler(SerLink::Frame &rxFrame, uint16_t* dataLen, char* data);
 
+// CTRL0 socket handlers - speed controller commands, documented above
+// their implementations, below the MOTOR socket's.
+void controlSockReceiveHandler(const char* data, uint16_t dataLen);
+bool controlSockInstantHandler(SerLink::Frame &rxFrame, uint16_t* dataLen, char* data);
+
 // ADC00 socket handler - reads only, documented above its implementation.
 bool adcSockInstantHandler(SerLink::Frame &rxFrame, uint16_t* dataLen, char* data);
 
@@ -448,6 +461,30 @@ SerLink::Socket* tachoSocket = nullptr;
 #define CONTROLB_OUTPUT_MAX_PERCENT 100U
 #define CONTROLB_MAX_PLAUSIBLE_RPM  3000U
 
+// Controller has its own direction type so it does not depend on the
+// motor driver; these translate for the TC78H611FNG. Written out for
+// every value rather than cast, so reordering either enum cannot quietly
+// swap forward and reverse.
+static TC78H611FNG::direction toMotorDirection(ControllerDirection direction)
+{
+  switch(direction)
+  {
+    case ControllerDirection::forward: return TC78H611FNG::forward;
+    case ControllerDirection::reverse: return TC78H611FNG::reverse;
+    default:                           return TC78H611FNG::idle;
+  }
+}
+
+static ControllerDirection fromMotorDirection(TC78H611FNG::direction direction)
+{
+  switch(direction)
+  {
+    case TC78H611FNG::forward: return ControllerDirection::forward;
+    case TC78H611FNG::reverse: return ControllerDirection::reverse;
+    default:                   return ControllerDirection::idle;
+  }
+}
+
 // Captureless lambdas, so they convert to the plain function pointers
 // ControllerConfig takes (see the note on its constructor).
 static const ControllerConfig controllerBConfig =
@@ -455,6 +492,10 @@ static const ControllerConfig controllerBConfig =
   []() -> uint16_t { return tachoB.getRpm(); },           // getRpm
   []() -> uint8_t  { return motorB.getPercent(); },       // getPwmPercent
   [](uint8_t percent) { motorB.setPercent(percent); },    // setPwmPercent
+  [](ControllerDirection direction)                       // setDirection
+    { motorB.setDirection(toMotorDirection(direction)); },
+  []() -> ControllerDirection                             // getDirection
+    { return fromMotorDirection(motorB.getDirection()); },
   CONTROLB_INTEGRAL_GAIN,
   CONTROLB_OUTPUT_MIN_PERCENT,
   CONTROLB_OUTPUT_MAX_PERCENT,
@@ -463,6 +504,11 @@ static const ControllerConfig controllerBConfig =
 };
 
 Controller controllerB(controllerBConfig);
+
+// Acquired on transport0 (uart2). Speed demands for the controllers -
+// the MOTOR socket keeps its own speed set for now, but this is the one
+// to use.
+SerLink::Socket* controlSocket = nullptr;
 
 //--------------------------------------------------------------
 // Analog inputs - ADC1, four ranks, scanned continuously into a circular
@@ -616,7 +662,8 @@ void initTasks()
   // already parked low - the state the datasheet asks for across a
   // standby transition. Call motorStandby.disable() to coast the
   // bridge without disturbing the PWM settings.
-  motorB.setPercent(MOTORB_START_PERCENT);
+  //motorB.setPercent(MOTORB_START_PERCENT);
+  motorB.setPercent(0);          // motor is idle - as it is now controlled by controllerB
   motorStandby.enable();
 
   motorTaskHandle = osThreadNew(startMotorTask, NULL, &motorTask_attributes);
@@ -654,12 +701,17 @@ void initTasks()
      the reader/writer setup it depends on. Still before the scheduler
      starts, so no task can see the socket half-registered.
 
-     transport0 holds seven of the SERLINK_CONFIG__MAX_SOCKETS slots -
-     RAD00, LED01, MOTOR, ADC00 and TACHO here, DBG00 and MQTT0 later,
-     from their own tasks. An acquire past the limit returns a silent
-     nullptr, which is why every socket pointer is checked before use. */
+     transport0 holds eight of the SERLINK_CONFIG__MAX_SOCKETS slots -
+     RAD00, LED01, MOTOR, CTRL0, ADC00 and TACHO here, DBG00 and MQTT0
+     later, from their own tasks. An acquire past the limit returns a
+     silent nullptr, which is why every socket pointer is checked before
+     use. */
   motorSocket = transport0.acquireSocket("MOTOR", motorSockReceiveHandler,
     motorSockInstantHandler);
+
+  /* Same split as MOTOR: sets in serLink0Task, reads on the ack. */
+  controlSocket = transport0.acquireSocket("CTRL0", controlSockReceiveHandler,
+    controlSockInstantHandler);
 
   /* Analog inputs. init() only builds the queue and registers adc1 for the
      HAL callbacks; start() arms the DMA and starts TIM2, after which the
@@ -1161,6 +1213,162 @@ bool motorSockInstantHandler(SerLink::Frame &rxFrame, uint16_t* dataLen, char* d
 }
 
 //--------------------------------------------------------------
+// CTRL0 socket - speed controller commands over SerLink0 (uart2).
+//
+// Frame data is <controller><command><args>:
+//
+//   Sets. Handled by controlSockReceiveHandler(), acked with a plain
+//   ACK_OK:
+//
+//     CTRL0T516006BR0120   required speed = 120 RPM (always 4 digits,
+//                          zero padded) - also enables the controller,
+//                          so the motor goes closed loop
+//     CTRL0T523003BDF      direction = forward
+//     CTRL0T523003BDR      direction = reverse
+//     CTRL0T523003BDD      direction = disabled (idle - the motor coasts)
+//
+//   Reads. Handled by controlSockInstantHandler(), answered on the ack:
+//
+//     CTRL0T529003BGR  ->  CTRL0A5290040120   required speed, 4 digits
+//     CTRL0T529003BGD  ->  CTRL0A529001F      direction, one of F/R/D
+//
+//   Status. Sent unsolicited by controlBTask every
+//   TACHO_PUBLISH_PERIOD_MS, as 'U' (no ack expected):
+//
+//     CTRL0U001008030.0350   motorB duty 30%, tachoB 350 RPM
+//
+//   Duty is 3 digits, RPM 4 (clamped at 9999). It carries no controller
+//   letter - it is always controllerB, the only one. Add one when
+//   controllerA exists.
+//
+// The controller only drives the motor while it has a direction - with
+// it idle the controller holds - so set a direction as well as a speed.
+// Either order works. The direction set does not enable the controller:
+// on its own it just starts the motor at whatever duty cycle it has.
+// Open loop (and so disabling the controller) is still the MOTOR
+// socket's percent set.
+//
+// The direction read reports the motor, so a direction set through the
+// MOTOR socket shows here too - see Direction in Controller.hpp.
+//
+// <controller> is resolved by controllerForSelector(), so it follows the
+// MOTOR socket's selectors: only controllerB exists, and 'A' reaches it
+// too until channel A is built.
+
+#define CONTROL_CMD_MIN_LEN        2U   // <ctl><cmd>
+#define CONTROL_CMD_SET_RPM_LEN    6U   // <ctl>R<dddd>
+#define CONTROL_CMD_DIRECTION_LEN  3U   // <ctl>D<F|R|D>
+#define CONTROL_CMD_GET_LEN        3U   // <ctl>G<R|D>
+#define CONTROL_RPM_FIELD_WIDTH    4U
+#define CONTROL_PWM_FIELD_WIDTH    3U   // status frame duty cycle, 0..100
+
+// Same letters as the MOTOR socket's direction commands, D for disabled
+// meaning idle.
+static bool controlDirectionFromChar(char value, ControllerDirection* direction)
+{
+  switch(value)
+  {
+    case 'F': *direction = ControllerDirection::forward; return true;
+    case 'R': *direction = ControllerDirection::reverse; return true;
+    case 'D': *direction = ControllerDirection::idle;    return true;
+    default:  return false;
+  }
+}
+
+static char controlDirectionToChar(ControllerDirection direction)
+{
+  switch(direction)
+  {
+    case ControllerDirection::forward: return 'F';
+    case ControllerDirection::reverse: return 'R';
+    default:                           return 'D';
+  }
+}
+
+// The sets. Runs in serLink0Task after the ack has gone out, so a
+// malformed command is dropped silently - read it back to confirm.
+void controlSockReceiveHandler(const char* data, uint16_t dataLen)
+{
+  if(dataLen < CONTROL_CMD_MIN_LEN)
+  {
+    return;
+  }
+
+  Controller* controller = controllerForSelector(data[0]);
+  if(controller == nullptr)
+  {
+    return;
+  }
+
+  switch(data[1])
+  {
+    case 'R':   // <ctl>R<dddd> - set required speed, closed loop
+    {
+      uint32_t rpm;
+
+      if((dataLen == CONTROL_CMD_SET_RPM_LEN) &&
+         readUintField(&data[2], CONTROL_RPM_FIELD_WIDTH, &rpm))
+      {
+        /* Demand first, so the first pass after enabling already works
+           towards it. Four digits cannot exceed uint16_t. */
+        controller->setRequiredRpm((uint16_t)rpm);
+        controller->enable();
+      }
+      break;
+    }
+
+    case 'D':   // <ctl>D<F|R|D> - set direction
+    {
+      ControllerDirection direction;
+
+      if((dataLen == CONTROL_CMD_DIRECTION_LEN) &&
+         controlDirectionFromChar(data[2], &direction))
+      {
+        controller->setDirection(direction);
+      }
+      break;
+    }
+
+    case 'G':   // reads are answered on the ack, in controlSockInstantHandler()
+    default:
+      break;
+  }
+}
+
+// The read. Runs in reader0Task, before the ack is sent. Returns false
+// for the set, leaving its ack a plain ACK_OK. Getter only, so no lock -
+// same reasoning as motorSockInstantHandler().
+bool controlSockInstantHandler(SerLink::Frame &rxFrame, uint16_t* dataLen, char* data)
+{
+  if((rxFrame.dataLen != CONTROL_CMD_GET_LEN) || (rxFrame.data[1] != 'G'))
+  {
+    return false;   // not a read - leave the ack alone
+  }
+
+  Controller* controller = controllerForSelector(rxFrame.data[0]);
+  if(controller == nullptr)
+  {
+    return false;
+  }
+
+  switch(rxFrame.data[2])
+  {
+    case 'R':   // required speed in RPM, 4 digits - same format the set takes
+      writeUintField(controller->getRequiredRpm(), CONTROL_RPM_FIELD_WIDTH, data);
+      *dataLen = CONTROL_RPM_FIELD_WIDTH;
+      return true;
+
+    case 'D':   // direction, one of F/R/D - same letters the set takes
+      data[0] = controlDirectionToChar(controller->getDirection());
+      *dataLen = 1U;
+      return true;
+
+    default:
+      return false;
+  }
+}
+
+//--------------------------------------------------------------
 // Analog input supervision.
 //
 // Nothing here is in the sample path: TIM2 triggers the scans, the DMA
@@ -1200,6 +1408,7 @@ void startControlBTask(void *argument)
   uint32_t passes = 0U;
 
   char speedData[1U + TACHO_RPM_FIELD_WIDTH + 1U + TACHO_GLITCH_FIELD_WIDTH];
+  char statusData[CONTROL_PWM_FIELD_WIDTH + 1U + CONTROL_RPM_FIELD_WIDTH];
 
   for(;;)
   {
@@ -1210,7 +1419,7 @@ void startControlBTask(void *argument)
        wind the output up to its limit for the motor to lurch at on the
        next direction change. hold() parks it instead, and it resumes
        from the motor's duty cycle once there is a direction again. */
-    if(motorB.getDirection() == TC78H611FNG::idle)
+    if(controllerB.getDirection() == ControllerDirection::idle)
     {
       controllerB.hold();
     }
@@ -1223,19 +1432,36 @@ void startControlBTask(void *argument)
     {
       passes = 0U;
 
+      /* writeUintField() writes the low digits of whatever it is given,
+         so a value wider than the field would be silently mangled -
+         getRpm() saturates at 65535, which is five digits. Clamp to the
+         field instead, so an implausible reading shows as 9999 rather
+         than as some unrelated number. Both fields below are 4 wide. */
+      static_assert(TACHO_RPM_FIELD_WIDTH == CONTROL_RPM_FIELD_WIDTH,
+        "rpmField is clamped for both sockets");
+      uint32_t rpmField = tachoB.getRpm();
+      if(rpmField > 9999U)
+      {
+        rpmField = 9999U;
+      }
+
+      if(controlSocket != nullptr)
+      {
+        /* <ppp>.<rrrr> - see the CTRL0 status frame. The duty cycle is
+           the motor's actual one, so it is right in open loop as well.
+           setPercent() clamps at 100, so three digits always fit. */
+        writeUintField(controllerB.getPwmPercent(), CONTROL_PWM_FIELD_WIDTH,
+          &statusData[0]);
+        statusData[CONTROL_PWM_FIELD_WIDTH] = '.';
+        writeUintField(rpmField, CONTROL_RPM_FIELD_WIDTH,
+          &statusData[CONTROL_PWM_FIELD_WIDTH + 1U]);
+
+        /* 'U': fire and forget, same reasoning as TACHO. */
+        controlSocket->sendData(statusData, (uint16_t)sizeof(statusData), false);
+      }
+
       if(tachoSocket != nullptr)
       {
-        /* writeUintField() writes the low digits of whatever it is given,
-           so a value wider than the field would be silently mangled -
-           getRpm() saturates at 65535, which is five digits. Clamp to the
-           field instead, so an implausible reading shows as 9999 rather
-           than as some unrelated number. */
-        uint32_t rpmField = tachoB.getRpm();
-        if(rpmField > 9999U)
-        {
-          rpmField = 9999U;
-        }
-
         speedData[0] = 'R';
         writeUintField(rpmField, TACHO_RPM_FIELD_WIDTH, &speedData[1]);
 
@@ -1247,7 +1473,7 @@ void startControlBTask(void *argument)
           &speedData[2U + TACHO_RPM_FIELD_WIDTH]);
 
         /* Non-blocking, and fire and forget. */
-        tachoSocket->sendData(speedData, (uint16_t)sizeof(speedData), false);
+        //tachoSocket->sendData(speedData, (uint16_t)sizeof(speedData), false);
       }
     }
 

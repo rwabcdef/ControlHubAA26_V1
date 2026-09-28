@@ -60,6 +60,21 @@
  * controller keeps accumulating through that lag, and overshoots if the
  * gain is too high for it. Tune integralGain low first and raise it.
  *
+ * Direction
+ * ---------
+ * The tachometer reports speed without sign, so the controller cannot
+ * sense direction - it can only set it. setDirection() passes straight
+ * through to the motor via config.setDirection, whether or not the
+ * controller is enabled, and getDirection() reads the motor back rather
+ * than a stored copy, so a direction set some other way (the MOTOR
+ * socket) is still reported truthfully. With the direction idle the
+ * motor cannot respond, and the owning task should call hold() instead
+ * of run().
+ *
+ * ControllerDirection is the controller's own type rather than the motor
+ * driver's, so this class does not depend on any one driver; the config
+ * callbacks translate.
+ *
  * Threading
  * ---------
  * run() and hold() belong to one task. setRequiredRpm(), enable() and
@@ -67,6 +82,10 @@
  * scalar, which this core stores atomically. They only record the
  * request - every change to the controller's running state happens in
  * run(), in the owning task, so there is nothing for them to race with.
+ *
+ * setDirection() is the exception: it acts at once, in the caller's
+ * task, through config.setDirection. That callback must therefore be
+ * safe to call alongside run()'s setPwmPercent from the owning task.
  *
  * run() writes the output with the scheduler suspended, having checked
  * the enable flag in the same suspended section. So a task that calls
@@ -81,6 +100,14 @@
 
 #include <stdint.h>
 
+// idle means no drive at all - the motor coasts. See Direction, above.
+enum class ControllerDirection : uint8_t
+{
+  forward,
+  reverse,
+  idle
+};
+
 class ControllerConfig
 {
   public:
@@ -94,6 +121,13 @@ class ControllerConfig
     // Output. For motorB, motorB.setPercent(). Called with the scheduler
     // suspended - see Threading, above.
     void (*setPwmPercent)(uint8_t percent);
+
+    // Direction, passed through to the motor. For motorB, motorB's
+    // setDirection() and getDirection(), translated. setDirection is
+    // called from whichever task calls Controller::setDirection() - see
+    // Threading, above.
+    void (*setDirection)(ControllerDirection direction);
+    ControllerDirection (*getDirection)();
 
     // Duty cycle change per pass, in percent per RPM of error. See the
     // class comment for why this is integral action.
@@ -148,6 +182,16 @@ class Controller
     void enable();
     void disable();
     bool isEnabled() const;
+
+    // Any task. Acts immediately, enabled or not - see Direction, above.
+    // getDirection() reads the motor, not a stored copy.
+    void setDirection(ControllerDirection direction);
+    ControllerDirection getDirection() const;
+
+    // Any task. The motor's duty cycle now, read through
+    // config.getPwmPercent. Unlike getOutputPercent() this is right in
+    // open loop too, whoever set it; while enabled the two agree.
+    uint8_t getPwmPercent() const;
 
     // The last value written, rounded, and the unrounded one behind it.
     uint8_t getOutputPercent() const;
