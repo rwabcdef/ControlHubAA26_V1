@@ -476,7 +476,7 @@ Tachometer tachoB(TIM5, GPIOF, TACHOB_PIN);
 // frame that went missing is better dropped than retried - the next one is
 // only TACHO_PUBLISH_PERIOD_MS away, and waiting on an ack would stall the
 // control loop.
-#define TACHO_PUBLISH_PERIOD_MS 2000
+#define TACHO_PUBLISH_PERIOD_MS 500  // 2000
 #define TACHO_RPM_FIELD_WIDTH   4U
 
 // Glitch count, after a '.' separator. getGlitchCount() is a uint16_t, so
