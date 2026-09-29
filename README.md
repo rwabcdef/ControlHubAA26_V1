@@ -66,7 +66,7 @@ In terminal:
 npm run pubsub    (this will send a ndreceive mqtt messages between dev kit and PC)
 
 #--------------------------------------------------------------------
-## Motor (with TC78H611FNG and TC78H611FNG_Standby)
+## MotorB (with TC78H611FNG and TC78H611FNG_Standby)
 
 TC78H611FNG IC is on ControlHubAA26 Peripheral Board A
 
@@ -74,4 +74,8 @@ PC6: TIM8_CH1 - CN12 pin4  -> IN1B (J10 pin 10)
 PC7: TIM8_CH2 - CN12 pin19 -> IN2B (J10 pin 8)
 PB8: GPIO     - CN12 pin3  -> nSTBY (J10 pin 6)
 
+#--------------------------------------------------------------------
+## TachoB
+
+PF4 (CN12 pin 38) # tachoB input pin
 #--------------------------------------------------------------------

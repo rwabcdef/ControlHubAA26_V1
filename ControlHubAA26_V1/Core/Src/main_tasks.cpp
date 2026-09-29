@@ -47,6 +47,16 @@ CTRL0T529003BGR     # read the required RPM back -> CTRL0A5290040120
 CTRL0T529003BGD     # read the direction back    -> CTRL0A529001R
 CTRL0U001008030.0350  # sent by the board: duty 30%, 350 RPM (no ack)
 
+# Lift socket - liftB, over MQTT only (SerLink2: publish to hub/aa26/serlink/down).
+# Every move runs at LIFTB_SPEED_RPM; distance is in tachoB edges (2 per rev).
+LIFT0U645006BSF234  # start liftB forward for 234 edges (1..6 digits)
+LIFT0U645006BSR234  # start liftB reverse for 234 edges
+LIFT0U645002BX      # stop liftB now (coasts)
+LIFT0T645002BT      # liftB status -> LIFT0A645014M000120.000234
+                    #   M moving / I idle, edges travelled, target
+# Sent by the board when a move ends (arrived or stopped):
+LIFT0U001015BI000234.000234   # liftB idle, 234 of 234 edges travelled
+
 # Adc socket - ADC1, ranks IN0/IN3/IN4/IN5 (PA0/PA3/PA4/PA5). Channel 1 is the motorB current sense.
 ADC00T529002G1      # raw count, 4 digits
 ADC00T529002V1      # millivolts, 4 digits
@@ -80,6 +90,7 @@ TACHOU001011R0432.00017   # 432 RPM, 17 glitches rejected since boot.
 #include "Adc.hpp"
 #include "Tachometer.hpp"
 #include "Controller.hpp"
+#include "Lift.hpp"
 #include "nRF24L01.hpp"
 #include "spi5.h"
 #include "Radio.hpp"
@@ -306,6 +317,11 @@ bool motorSockInstantHandler(SerLink::Frame &rxFrame, uint16_t* dataLen, char* d
 // their implementations, below the MOTOR socket's.
 void controlSockReceiveHandler(const char* data, uint16_t dataLen);
 bool controlSockInstantHandler(SerLink::Frame &rxFrame, uint16_t* dataLen, char* data);
+
+// LIFT0 socket handlers - lift commands, documented above their
+// implementations, below the CTRL0 socket's.
+void liftSockReceiveHandler(const char* data, uint16_t dataLen);
+bool liftSockInstantHandler(SerLink::Frame &rxFrame, uint16_t* dataLen, char* data);
 
 // ADC00 socket handler - reads only, documented above its implementation.
 bool adcSockInstantHandler(SerLink::Frame &rxFrame, uint16_t* dataLen, char* data);
@@ -558,6 +574,50 @@ static const ControllerConfig controllerBConfig =
 
 Controller controllerB(controllerBConfig);
 
+//--------------------------------------------------------------
+// liftB - moves by distance on top of controllerB. See Lift.hpp.
+//
+// liftB owns controllerB: controlBTask calls liftB.run(), which runs the
+// controller. Lift runs it whether or not a move is in progress, so the
+// CTRL0 socket still works while the lift is idle - but it should not be
+// used during a move, which it can stall or cut short.
+//
+// Distance is tachoB edges, PULSES_PER_REV (2) per revolution - see
+// Tachometer::getEdges() for why not revolutions.
+//
+// LIFTB_FORWARD_DIRECTION is the controller direction that moves the
+// lift forward. Swap it if the lift is mounted the other way round.
+#define LIFTB_SPEED_RPM          150U
+#define LIFTB_FORWARD_DIRECTION  ControllerDirection::forward
+
+Lift liftB(&controllerB, LIFTB_FORWARD_DIRECTION, LIFTB_SPEED_RPM,
+           []() -> uint32_t { return tachoB.getEdges(); });
+
+// A lift command, parsed by liftSockReceiveHandler() in serLink2Task and
+// carried to controlBTask, which owns liftB. One queue item per command,
+// so a command's fields always arrive together - they cannot be mixed
+// with the next command's the way separate shared variables could.
+struct LiftCmd
+{
+  enum op_t : uint8_t { start, stop };
+
+  Lift*           lift;
+  op_t            op;
+  Lift::direction dir;        // start only
+  uint32_t        distance;   // start only
+};
+
+// Commands arriving within one CONTROLB_PERIOD_MS. A command sent with
+// the queue full is dropped - over a 'T' frame the ack has already gone,
+// so check with the status read.
+#define LIFT_CMD_QUEUE_LENGTH 4
+StaticQueue_t liftCmdStaticQueue;
+uint8_t liftCmdQueueStorageArea[LIFT_CMD_QUEUE_LENGTH * sizeof(LiftCmd)];
+QueueHandle_t liftCmdQueue;
+
+// Acquired on transport2 (SerLink2, MQTT) only.
+SerLink::Socket* liftMqttSocket = nullptr;
+
 // CTRL0 - speed demands for the controllers. The MOTOR socket keeps its
 // own speed set for now, but this is the one to use. Two sockets, one
 // per link, sharing the same handlers (see the CTRL0 section):
@@ -775,6 +835,14 @@ void initTasks()
      set speed command arrives. Before controlBTask exists, like tachoB. */
   controllerB.init();
 
+  /* Only validates - the lift is idle until a start command. Its command
+     queue is created here, with it, so both exist before controlBTask
+     can drain one or the LIFT0 socket (acquired below, with SerLink2)
+     can post to it. */
+  liftB.init();
+  liftCmdQueue = xQueueCreateStatic(LIFT_CMD_QUEUE_LENGTH, sizeof(LiftCmd),
+    liftCmdQueueStorageArea, &liftCmdStaticQueue);
+
   controlBTaskHandle = osThreadNew(startControlBTask, NULL, &controlBTask_attributes);
 
   writer0.init(uart2_writeBlocking);
@@ -852,6 +920,11 @@ void initTasks()
   transport2.acquireSocket("DBG00", nullptr, debugSockInstantHandler);
   controlMqttSocket = transport2.acquireSocket("CTRL0", controlSockReceiveHandler,
     controlSockInstantHandler);
+
+  /* Commands in serLink2Task, posted on to controlBTask; the status read
+     on the ack, from reader2Task. */
+  liftMqttSocket = transport2.acquireSocket("LIFT0", liftSockReceiveHandler,
+    liftSockInstantHandler);
 
   writer2.init([](char* buffer) -> uint8_t { return mqtt2.write(buffer); });
   reader2.init(mqtt2.rxDataQueue, &writer2, transport2.queue);
@@ -1476,6 +1549,169 @@ bool controlSockInstantHandler(SerLink::Frame &rxFrame, uint16_t* dataLen, char*
 }
 
 //--------------------------------------------------------------
+// LIFT0 socket - lift commands over SerLink2 (MQTT).
+//
+// Frame data is <lift><command><args>:
+//
+//   Commands. Handled by liftSockReceiveHandler(), which runs in
+//   serLink2Task and only parses: the command goes on liftCmdQueue for
+//   controlBTask, which owns liftB. Send as 'U' or 'T' - a 'T' ack says
+//   the frame arrived, not that the lift moved:
+//
+//     LIFT0U645006BSF234   start forward, 234 edges (1..6 digits)
+//     LIFT0U645006BSR234   start reverse, 234 edges
+//     LIFT0U645002BX       stop - the motor coasts
+//
+//   A start while the lift is moving is ignored - stop it first. So is a
+//   distance of zero.
+//
+//   Read. Handled by liftSockInstantHandler(), answered on the ack, so it
+//   must be sent as 'T':
+//
+//     LIFT0T645002BT  ->  LIFT0A645014M000120.000234
+//
+//   <M|I>        moving or idle
+//   <dddddd>     edges travelled since the last start - still counting
+//                after a move ends, so the coast overrun shows
+//   <dddddd>     that start's target
+//
+//   Both clamped at 999999.
+//
+//   Done. Sent unsolicited by controlBTask on the pass a move ends -
+//   distance reached or stop command - with the lift's letter in front,
+//   since nothing asked:
+//
+//     LIFT0U<rrr>015BI000234.000234   liftB idle, 234 of 234 edges
+//
+//   The travelled count is taken at that pass, so it does not include
+//   the coast that follows; a status read a moment later does. A start
+//   and a stop landing in the same pass never show the lift moving, so
+//   send nothing. 'U' unless LIFT_DONE_ACK - see there.
+//
+// <lift> is resolved by liftForSelector(): only liftB exists.
+
+#define LIFT_CMD_MIN_LEN         2U   // <lift><cmd>
+#define LIFT_CMD_START_MIN_LEN   4U   // <lift>S<F|R><d>
+#define LIFT_DISTANCE_MAX_DIGITS 6U
+#define LIFT_CMD_START_MAX_LEN   (3U + LIFT_DISTANCE_MAX_DIGITS)
+#define LIFT_CMD_STATUS_LEN      2U   // <lift>T
+#define LIFT_FIELD_WIDTH         LIFT_DISTANCE_MAX_DIGITS
+#define LIFT_FIELD_MAX           999999U
+#define LIFT_STATUS_LEN          (2U + (2U * LIFT_FIELD_WIDTH))   // <M|I><d6>.<d6>
+
+// The done message's frame type. 'U' (false) matches the CTRL0 status
+// frame: fire and forget, and over MQTT - TCP underneath - it is lost
+// only if the broker or the PC is not there. true sends it as 'T', and
+// writer2 then retries until the PC acks it; only worth it if the PC
+// side sends acks, or every done message costs writer2 its full retry
+// cycle and holds up the frames queued behind it.
+#define LIFT_DONE_ACK            false
+
+// <M|I><travelled>.<target> into dst, LIFT_STATUS_LEN chars, no NUL -
+// the status read's answer and the done message share it. Getters only,
+// so safe from any task.
+static void writeLiftStatus(const Lift& lift, char* dst)
+{
+  /* writeUintField() keeps only the low digits, so clamp rather than
+     report an unrelated number. */
+  uint32_t travelled = lift.getTravelled();
+  uint32_t target = lift.getTarget();
+  if(travelled > LIFT_FIELD_MAX) { travelled = LIFT_FIELD_MAX; }
+  if(target > LIFT_FIELD_MAX)    { target = LIFT_FIELD_MAX; }
+
+  dst[0] = (lift.getStatus() == Lift::status::moving) ? 'M' : 'I';
+  writeUintField(travelled, LIFT_FIELD_WIDTH, &dst[1]);
+  dst[1U + LIFT_FIELD_WIDTH] = '.';
+  writeUintField(target, LIFT_FIELD_WIDTH, &dst[2U + LIFT_FIELD_WIDTH]);
+}
+
+static Lift* liftForSelector(char selector)
+{
+  switch(selector)
+  {
+    case 'B':
+      return &liftB;
+
+    default:
+      return nullptr;
+  }
+}
+
+// Runs in serLink2Task. Parses and posts; liftB itself is only touched
+// by controlBTask. Never blocks - a full queue drops the command.
+void liftSockReceiveHandler(const char* data, uint16_t dataLen)
+{
+  if(dataLen < LIFT_CMD_MIN_LEN)
+  {
+    return;
+  }
+
+  LiftCmd cmd = {};
+  cmd.lift = liftForSelector(data[0]);
+  if(cmd.lift == nullptr)
+  {
+    return;
+  }
+
+  switch(data[1])
+  {
+    case 'S':   // <lift>S<F|R><d..d> - start
+    {
+      if((dataLen < LIFT_CMD_START_MIN_LEN) || (dataLen > LIFT_CMD_START_MAX_LEN))
+      {
+        return;
+      }
+
+      if(data[2] == 'F')      { cmd.dir = Lift::direction::forward; }
+      else if(data[2] == 'R') { cmd.dir = Lift::direction::reverse; }
+      else                    { return; }
+
+      if(!readUintField(&data[3], (uint8_t)(dataLen - 3U), &cmd.distance))
+      {
+        return;
+      }
+
+      cmd.op = LiftCmd::start;
+      break;
+    }
+
+    case 'X':   // <lift>X - stop
+      if(dataLen != LIFT_CMD_MIN_LEN)
+      {
+        return;
+      }
+      cmd.op = LiftCmd::stop;
+      break;
+
+    case 'T':   // status - answered on the ack, in liftSockInstantHandler()
+    default:
+      return;
+  }
+
+  (void)xQueueSend(liftCmdQueue, &cmd, 0U);
+}
+
+// The status read. Runs in reader2Task, before the ack is sent. Getters
+// only - see Threading in Lift.hpp.
+bool liftSockInstantHandler(SerLink::Frame &rxFrame, uint16_t* dataLen, char* data)
+{
+  if((rxFrame.dataLen != LIFT_CMD_STATUS_LEN) || (rxFrame.data[1] != 'T'))
+  {
+    return false;   // a command - leave the ack a plain ACK_OK
+  }
+
+  Lift* lift = liftForSelector(rxFrame.data[0]);
+  if(lift == nullptr)
+  {
+    return false;
+  }
+
+  writeLiftStatus(*lift, data);
+  *dataLen = LIFT_STATUS_LEN;
+  return true;
+}
+
+//--------------------------------------------------------------
 // Analog input supervision.
 //
 // Nothing here is in the sample path: TIM2 triggers the scans, the DMA
@@ -1501,10 +1737,9 @@ void startAdcTask(void *argument)
 // This is the one task allowed to call update(). The getters are safe
 // from anywhere - see the threading note in Tachometer.hpp.
 //
-// controllerB runs between the update and the delay, so it always sees
-// the reading taken this pass. It does nothing until the MOTOR socket
-// enables it; until then the motor runs open loop, at whatever percent
-// startMotorTask or the socket last set.
+// liftB runs between the update and the delay - and runs controllerB -
+// so both always see the reading taken this pass. controllerB does
+// nothing until a lift start (or the MOTOR/CTRL0 socket) enables it.
 void startControlBTask(void *argument)
 {
   TickType_t xLastWakeTime = xTaskGetTickCount();
@@ -1517,23 +1752,50 @@ void startControlBTask(void *argument)
   char speedData[1U + TACHO_RPM_FIELD_WIDTH + 1U + TACHO_GLITCH_FIELD_WIDTH];
   char statusData[CONTROL_PWM_FIELD_WIDTH + 1U + CONTROL_RPM_FIELD_WIDTH];
 
+  /* liftB's status as of the end of the previous pass, so a move ending
+     shows as moving -> idle across liftB.run(). */
+  Lift::status liftBLastStatus = liftB.getStatus();
+  char liftDoneData[1U + LIFT_STATUS_LEN];   // <lift><status>
+
   for(;;)
   {
     tachoB.update();
 
-    /* With the direction idle the bridge is stopped and the tacho reads
-       zero whatever the duty cycle, so running the controller would only
-       wind the output up to its limit for the motor to lurch at on the
-       next direction change. hold() parks it instead, and it resumes
-       from the motor's duty cycle once there is a direction again. */
-    if(controllerB.getDirection() == ControllerDirection::idle)
+    /* Lift commands from the LIFT0 socket. After the update, so a start
+       measures from this pass's edge count; drained completely, so a
+       start and a stop sent together are both seen, in order. */
+    LiftCmd cmd;
+    while(xQueueReceive(liftCmdQueue, &cmd, 0U) == pdTRUE)
     {
-      controllerB.hold();
+      if(cmd.op == LiftCmd::start)
+      {
+        (void)cmd.lift->start(cmd.dir, cmd.distance);   // refused if moving
+      }
+      else
+      {
+        cmd.lift->stop();
+      }
     }
-    else
+
+    /* Ends the move if its distance is up, then runs controllerB - or
+       holds it while the direction is idle. See Lift::run(). */
+    liftB.run();
+
+    /* A move has ended since the last pass - distance reached in run(),
+       or a stop command above. Tell the PC over the socket the start came
+       in on. Non-blocking: sendData() only queues the frame for writer2,
+       and it is dropped if mqtt2 is not connected. */
+    Lift::status liftBStatus = liftB.getStatus();
+    if((liftBLastStatus == Lift::status::moving) &&
+       (liftBStatus == Lift::status::idle) &&
+       (liftMqttSocket != nullptr))
     {
-      controllerB.run();
+      liftDoneData[0] = 'B';
+      writeLiftStatus(liftB, &liftDoneData[1]);
+      liftMqttSocket->sendData(liftDoneData, (uint16_t)sizeof(liftDoneData),
+        LIFT_DONE_ACK);
     }
+    liftBLastStatus = liftBStatus;
 
     if(++passes >= publishEvery)
     {

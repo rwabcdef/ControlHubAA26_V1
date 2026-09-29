@@ -406,11 +406,11 @@ GPIO
   
 --------------------------------------------------------------------------
 --------------------------------------------------------------------------
-ControlHubAA26 Peripheral Board A  - Proposed Modifications
+## ControlHubAA26 Peripheral Board A  - Proposed Modifications
 
 Drill holes round edges
 
-12V connector straight to board, with Power diode at input
+12V connector straight to board, with Power diode at input and fuse holder
 
 Bulk (electrolytic) capacitors and inductor throught holes
 
@@ -418,5 +418,11 @@ RC filter (integrator) after motor current sense amp (INA240A) output (before ou
 
 Selection jumpers to make 5V & 3.3V SMPSUs be fed via current limit or not
 
+Rotary encoder
 
+nRF24L01 position away from motor
+
+Tacho differential receiver
+
+SD card connection
   

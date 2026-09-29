@@ -168,6 +168,13 @@ class Tachometer
     // Total whole revolutions since init().
     uint32_t getRevolutions() const;
 
+    // Every accepted edge since init(), counted as update() drains it -
+    // PULSES_PER_REV of them per revolution. Unlike getRevolutions() it is
+    // not held back by the whole-revolution timing and loses nothing to a
+    // stall, so it is the one to measure distance with: a move from rest
+    // registers from its first edge, and a stop discards no part turn.
+    uint32_t getEdges() const;
+
     // Diagnostics: low-reading edges rejected by the arming check or
     // TACHO__MIN_EDGE_TICKS, and edges lost to a full queue. Spikes on a
     // high line are not counted - they cannot be told apart from real
@@ -209,6 +216,7 @@ class Tachometer
     volatile uint16_t rpm;
     volatile bool     stalled;
     volatile uint32_t revolutions;
+    volatile uint32_t edges;
 
     // Task side only, carried across update() calls: the edge that
     // opened the revolution currently being timed, and how many edges

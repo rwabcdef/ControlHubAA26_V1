@@ -82,6 +82,7 @@ Tachometer::Tachometer(TIM_TypeDef* timebase, GPIO_TypeDef* port, uint16_t pin)
     rpm(0U),
     stalled(true),
     revolutions(0U),
+    edges(0U),
     revStartTick(0U),
     hasRevStart(false),
     edgesSinceRevStart(0U),
@@ -286,6 +287,9 @@ void Tachometer::update()
     lastSeenTick = tick;
     hasSeenEdge = true;
 
+    /* Before the revolution logic, so no edge is skipped - see getEdges(). */
+    edges++;
+
     if(!hasRevStart)
     {
       /* First edge after init() or after a stall: it opens a revolution
@@ -388,6 +392,11 @@ bool Tachometer::isStalled() const
 uint32_t Tachometer::getRevolutions() const
 {
   return revolutions;
+}
+
+uint32_t Tachometer::getEdges() const
+{
+  return edges;
 }
 
 uint16_t Tachometer::getGlitchCount() const
