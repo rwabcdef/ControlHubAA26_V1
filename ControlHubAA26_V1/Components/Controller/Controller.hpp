@@ -67,19 +67,34 @@
  * to outputMaxPercent and stays there. outputMaxPercent bounds how hard
  * the motor is driven meanwhile, but not for how long. So if the reading
  * stays at zero for tachoUnresponsiveTimeout_S while run() is driving
- * with a non-zero demand, run() stops the motor itself: it disables the
- * controller, writes 0%, sets the direction idle and latches a fault
- * (isTachoFault()).
+ * hard enough that the motor should be turning, with a non-zero demand,
+ * run() stops the motor itself: it disables the controller, writes 0%,
+ * sets the direction idle and latches a fault (isTachoFault()).
  *
- * The timeout has to cover a genuine start as well as a dead sensor. The
- * output ramps up from wherever the motor was (Bumpless start, below),
- * which from rest is 0%, and the tachometer reads zero until the first
- * revolution completes (Feedback lag, below) - so allow for the ramp to
- * the motor's breakaway duty plus a revolution at low speed.
+ * "Hard enough" is output >= tachoCheckMinPercent, and it is what keeps
+ * the check independent of the gain. From rest the output ramps up from
+ * 0% (Bumpless start, below) at integralGain * demand per pass - at a
+ * low gain and a low demand that is well under 1%/s, so the ramp to the
+ * motor's breakaway duty alone can take tens of seconds. A timer running
+ * from the start would have to allow for the slowest ramp ever used, and
+ * would then let a dead tacho drive the motor for just as long. Timed
+ * from tachoCheckMinPercent instead, the ramp does not count however
+ * slow it is, and the timeout only has to cover what follows: the rest
+ * of the climb to breakaway, if tachoCheckMinPercent is set below it,
+ * and the first revolution, which the tachometer needs before it reads
+ * anything (Feedback lag, below). Set tachoCheckMinPercent at or just
+ * above the breakaway duty, and at or below outputMaxPercent - above it
+ * the check could never run, so init() refuses that.
  *
  * Only a sustained zero counts. A reading rejected as implausible does
- * not, and one non-zero reading restarts the count. Nor does a zero
- * demand, where zero is the right answer, or a pass spent in hold().
+ * not, and one non-zero reading restarts the count - as does the output
+ * dropping below tachoCheckMinPercent. Nor does a zero demand, where zero
+ * is the right answer, or a pass spent in hold().
+ *
+ * A demand the tachometer cannot measure looks exactly like a dead one:
+ * if the motor is turning below the tachometer's lowest readable speed,
+ * the reading is zero, the output climbs, and the check trips. Keep
+ * demands above that floor (Tachometer.hpp, TACHO__STALL_TIMEOUT_MS).
  *
  * The fault stays set, and the controller disabled, until the next
  * enable(); the first run() after that clears it and starts again. A
@@ -102,9 +117,12 @@
  *
  * Threading
  * ---------
- * run() and hold() belong to one task. setRequiredRpm(), enable() and
- * disable() may be called from any other task: each writes one aligned
- * scalar, which this core stores atomically. They only record the
+ * run() and hold() belong to one task. setRequiredRpm(), setIntegralGain(),
+ * enable() and disable() may be called from any other task: each writes
+ * one aligned scalar (a float is a single 32 bit store on this core too),
+ * which this core stores atomically. A gain change lands between passes -
+ * it never tears a pass, and the output carries on from where it is, so
+ * retuning a running motor is bumpless. They only record the
  * request - every change to the controller's running state happens in
  * run(), in the owning task, so there is nothing for them to race with.
  *
@@ -155,7 +173,8 @@ class ControllerConfig
     ControllerDirection (*getDirection)();
 
     // Duty cycle change per pass, in percent per RPM of error. See the
-    // class comment for why this is integral action.
+    // class comment for why this is integral action. The starting value
+    // only - setIntegralGain() changes it at run time, until reset.
     float integralGain;
 
     // Output limits, percent. outputMinPercent above zero keeps the motor
@@ -172,6 +191,13 @@ class ControllerConfig
     // demand, before run() stops the motor and latches a fault. 0 turns
     // the check off. See Unresponsive tachometer, above.
     uint16_t tachoUnresponsiveTimeout_S;
+
+    // The output, percent, from which that timeout counts: the duty at
+    // which the motor ought to be turning. Below it a zero reading is
+    // expected - the output is still ramping up to breakaway - and not
+    // counted. 0 counts from the start. Must be <= outputMaxPercent. See
+    // Unresponsive tachometer, above.
+    uint8_t tachoCheckMinPercent;
 
     // How often the owning task calls run(). Unused by this class's own
     // law; there for subclasses that need real time units.
@@ -208,6 +234,18 @@ class Controller
     void setRequiredRpm(uint16_t rpm);
     uint16_t getRequiredRpm() const;
 
+    // Any task. The gain the control law uses from the next pass. Returns
+    // false, and keeps the old gain, unless 0 <= gain <= MAX_INTEGRAL_GAIN
+    // (NaN fails both tests, so is refused too). Zero is allowed: the
+    // output then holds wherever it is. Starts at config.integralGain;
+    // init() refuses a config whose gain is outside the same range.
+    bool  setIntegralGain(float gain);
+    float getIntegralGain() const;
+
+    // 1% of duty per RPM of error, per pass - far past anything stable,
+    // so only a typo gets near it.
+    static constexpr float MAX_INTEGRAL_GAIN = 1.0f;
+
     // Any task. enable() hands the motor to the controller from the next
     // run(); disable() hands it back, and nothing more is written.
     // enable() is also how a tacho fault is cleared - see Unresponsive
@@ -226,6 +264,11 @@ class Controller
     // open loop too, whoever set it; while enabled the two agree.
     uint8_t getPwmPercent() const;
 
+    // Any task. The measured speed now, read through config.getRpm - the
+    // feedback, as the next run() would see it (so possibly a reading
+    // run() will reject as implausible). 0 before init() has passed.
+    uint16_t getRpm() const;
+
     // The last value written, rounded, and the unrounded one behind it.
     uint8_t getOutputPercent() const;
     float getOutput() const;
@@ -234,7 +277,8 @@ class Controller
     uint16_t getRejectedCount() const;
 
     // Any task. True once run() has stopped the motor because the
-    // tachometer read zero for tachoUnresponsiveTimeout_S; stays true
+    // tachometer read zero for tachoUnresponsiveTimeout_S with the output
+    // at or above tachoCheckMinPercent; stays true
     // until the first run() after the next enable().
     bool isTachoFault() const;
 
@@ -252,6 +296,7 @@ class Controller
 
   private:
     volatile uint16_t requiredRpm;
+    volatile float    integralGain;   // the live gain; config.integralGain is its start
     volatile bool     enabled;
     volatile uint16_t rejectedCount;
     volatile bool     tachoFault;   // written by the owning task only

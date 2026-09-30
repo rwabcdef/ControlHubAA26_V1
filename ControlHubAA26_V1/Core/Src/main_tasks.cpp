@@ -18,6 +18,13 @@
  DBG00T349002SL      # the task with the least stack free, same format
  DBG00T349001M       # MQTT link (SerLink2): C/D connected, rx, tx, tx dropped, other topic
 
+ # ping - any socket, any link ('S' = system frame, see Socket.hpp). Answered by
+ # SerLink itself; never reaches the socket's handlers.
+ MOTORS045004PING    # -> MOTORA045008PINGBACK  socket exists on this link
+ XXXXXS045004PING    # -> XXXXXA045900          no such socket: plain ACK_OK
+ LIFT0S045004PING    # -> LIFT0A045008PINGBACK over MQTT, but LIFT0A045900
+                     #    on serial - LIFT0 is on MQTT only
+
  # led socket - relayed to the radio, and ultimatelty to the remote hub (arduino uno r4)
 LED01U492002A1
 LED01U492002A0
@@ -32,6 +39,15 @@ MOTORT516006BS0300  # closed loop: hold 300 RPM (controllerB takes over)
 MOTORT529003BGS     # read the required RPM back, 4 digits
 
 # Control socket - speed controllers. controllerB drives motorB from tachoB.
+# On serial AND on MQTT (SerLink2) - two sockets sharing the same handlers,
+# driving the same controllerB, so the last command from either link wins.
+#
+# Safety limits (see Unresponsive tachometer in Controller.hpp): the duty is
+# capped at CONTROLB_OUTPUT_MAX_PERCENT (50%), and if the tacho reads 0 for
+# CONTROLB_TACHO_TIMEOUT_S (10 s) with a speed demanded and the duty at or
+# above CONTROLB_TACHO_CHECK_MIN_PERCENT (20%), the controller stops
+# the motor (0%, direction D) and latches a tacho fault. The next speed set
+# (BR<dddd>, MOTOR BS<dddd> or a lift start) clears it.
 
 # start closed loop motor run
 CTRL0T523003BDF     # controllerB: direction forward
@@ -41,32 +57,51 @@ CTRL0T516006BR0120  # controllerB: hold 120 RPM (enables closed loop)
 CTRL0T516006BR0000
 CTRL0T523003BDD
 
+# sets - plain ACK_OK; a malformed set is dropped silently, so read it back
 CTRL0T516006BR0120  # controllerB: hold 120 RPM (enables closed loop)
 CTRL0T523003BDF     # controllerB: direction forward
 CTRL0T523003BDR     # controllerB: direction reverse (F forward, D disabled)
-CTRL0T529003BGR     # read the required RPM back -> CTRL0A5290040120
-CTRL0T529003BGD     # read the direction back    -> CTRL0A529001R
-CTRL0T529003BGF     # tacho fault (motor stopped, tacho read 0 too long) -> CTRL0A5290011
-CTRL0U001008030.0350  # sent by the board: duty 30%, 350 RPM (no ack)
+CTRL0T516008BI002000  # integral gain = 0.002 (6 digits, millionths: 000000..999999).
+                      # Next pass, bumpless; lasts until reset (boot value is
+                      # CONTROLB_INTEGRAL_GAIN)
+
+# reads - answered on the ack
+CTRL0T529003BGR     # required RPM              -> CTRL0A5290040120
+CTRL0T529003BGD     # direction, F/R/D          -> CTRL0A529001R
+CTRL0T529003BGF     # tacho fault, 1/0          -> CTRL0A5290011
+CTRL0T529003BGI     # integral gain, millionths -> CTRL0A529006002000
+CTRL0T529003BGA     # all: gain.required.measured RPM
+                    #                           -> CTRL0A529016002000.0150.0148
+
+# Sent by the board every TACHO_PUBLISH_PERIOD_MS, ONLY while liftB is moving
+# (on both links, 'U' so no ack):
+CTRL0U001008030.0350  # duty 30%, measured 350 RPM
 
 # Lift socket - liftB, over MQTT only (SerLink2: publish to hub/aa26/serlink/down).
-# Every move runs at LIFTB_SPEED_RPM; distance is in tachoB edges (2 per rev).
+# Direction and distance only - distance in tachoB edges (2 per rev). The speed
+# is controllerB's: set it first with CTRL0 BR<dddd> (it can be changed
+# mid-move); it boots at CONTROLB_BOOT_RPM (100). A start with the required
+# speed at 0 is refused silently, so nothing moves.
+CTRL0T516006BR0020  # speed for the moves that follow: 20 RPM
 LIFT0U645006BSF234  # start liftB forward for 234 edges (1..6 digits)
 LIFT0U645006BSR234  # start liftB reverse for 234 edges
 LIFT0U645002BX      # stop liftB now (coasts)
 LIFT0T645002BT      # liftB status -> LIFT0A645014M000120.000234
                     #   M moving / I idle, edges travelled, target
-# Sent by the board when a move ends (arrived or stopped):
+# Sent by the board when a move ends (arrived, stopped, or tacho fault):
 LIFT0U001015BI000234.000234   # liftB idle, 234 of 234 edges travelled
+LIFT0U001015BI000000.000234   # ended short - with CTRL0 BGF reading 1, the
+                              # tacho timeout stopped it
 
 # Adc socket - ADC1, ranks IN0/IN3/IN4/IN5 (PA0/PA3/PA4/PA5). Channel 1 is the motorB current sense.
 ADC00T529002G1      # raw count, 4 digits
 ADC00T529002V1      # millivolts, 4 digits
 ADC00T529002GA      # all four channels, raw
 
-# Tacho socket - motorB speed in RPM, published unsolicited by controlBTask
-# every TACHO_PUBLISH_PERIOD_MS. Transmit only, so there is nothing to type -
-# this is what appears in the terminal:
+# Tacho socket - motorB speed in RPM. Transmit only, so there is nothing to
+# type. CURRENTLY OFF: the send in startControlBTask is commented out (the
+# CTRL0 status frame, and CTRL0 BGA, carry the measured RPM instead).
+# Uncommented, it would appear every TACHO_PUBLISH_PERIOD_MS as:
 TACHOU001011R0432.00017   # 432 RPM, 17 glitches rejected since boot.
                           # 'U', so the board expects no ack back
 
@@ -521,8 +556,8 @@ SerLink::Socket* tachoSocket = nullptr;
 // CONTROLB_INTEGRAL_GAIN is duty cycle percent per RPM of error, per
 // pass. At 20 Hz, 0.002 moves the output 4%/s for a 100 RPM error. That
 // is deliberately slow: the tachometer's reading lags by up to a
-// revolution-average (~1 s at low speed), and this law keeps integrating
-// through the lag. Raise it once the response has been seen.
+// revolution-average (TACHO__AVG_REVS revolutions - 2.4 s at 50 RPM), and
+// this law keeps integrating through the lag. Raise it once the response has been seen.
 //
 // CONTROLB_MAX_PLAUSIBLE_RPM only has to catch sensor faults, so it sits
 // well above anything this gearbox reaches - lower it if a real top
@@ -531,21 +566,33 @@ SerLink::Socket* tachoSocket = nullptr;
 // CONTROLB_OUTPUT_MAX_PERCENT caps the duty cycle the controller can
 // ever write. With a dead or unplugged tacho the reading is zero and the
 // law climbs straight to this limit, so it is also how hard the motor is
-// driven until the timeout below stops it. 50% covers LIFTB_SPEED_RPM;
-// raise it if a demand ever needs more.
+// driven until the timeout below stops it. Raise it if a demand ever
+// needs more than 50% to reach.
 //
 // CONTROLB_TACHO_TIMEOUT_S: how long the tacho may read zero, with a
-// non-zero demand, before controllerB stops the motor and latches a
-// fault (CTRL0T529003BGF reads it). It has to outlast a genuine start
-// from rest: the output ramps from 0% at CONTROLB_INTEGRAL_GAIN *
-// demand per pass - 0.3% per pass, 6%/s, at 150 RPM - so reaching the
-// motor's breakaway duty takes a few seconds, and tachoB then reads zero
-// until the first revolution completes. 0 turns the check off.
+// non-zero demand and the duty at or above CONTROLB_TACHO_CHECK_MIN_PERCENT,
+// before controllerB stops the motor and latches a fault (CTRL0T529003BGF
+// reads it). 0 turns the check off.
+//
+// CONTROLB_TACHO_CHECK_MIN_PERCENT is the duty at which the motor ought to
+// be turning faster than tachoB can measure (~17 RPM with 2 magnets and
+// a 2000 ms TACHO__STALL_TIMEOUT_MS - see there). The timer only runs from there, so the ramp up
+// from 0% never counts, however slowly a low gain and a low demand make it
+// climb (gain 0.0015 at 40 RPM is 1.2%/s - 10 s only reached ~12%). The
+// timeout then only has to cover the first revolution or two. 20% held
+// ~150 RPM on the bench; lower it if the motor is seen turning well below
+// that, and it must stay <= CONTROLB_OUTPUT_MAX_PERCENT.
 #define CONTROLB_INTEGRAL_GAIN      0.002f
 #define CONTROLB_OUTPUT_MIN_PERCENT 0U
 #define CONTROLB_OUTPUT_MAX_PERCENT 50U
 #define CONTROLB_MAX_PLAUSIBLE_RPM  3000U
 #define CONTROLB_TACHO_TIMEOUT_S    10U
+#define CONTROLB_TACHO_CHECK_MIN_PERCENT 20U
+
+// The required speed controllerB boots with, set in initTasks(). Setting
+// it does not enable the controller, so nothing moves at boot - it is the
+// speed a lift move runs at until CTRL0 BR<dddd> sets another.
+#define CONTROLB_BOOT_RPM           100U
 
 // Controller has its own direction type so it does not depend on the
 // motor driver; these translate for the TC78H611FNG. Written out for
@@ -587,6 +634,7 @@ static const ControllerConfig controllerBConfig =
   CONTROLB_OUTPUT_MAX_PERCENT,
   CONTROLB_MAX_PLAUSIBLE_RPM,
   CONTROLB_TACHO_TIMEOUT_S,
+  CONTROLB_TACHO_CHECK_MIN_PERCENT,
   CONTROLB_PERIOD_MS
 };
 
@@ -597,18 +645,22 @@ Controller controllerB(controllerBConfig);
 //
 // liftB owns controllerB: controlBTask calls liftB.run(), which runs the
 // controller. Lift runs it whether or not a move is in progress, so the
-// CTRL0 socket still works while the lift is idle - but it should not be
-// used during a move, which it can stall or cut short.
+// CTRL0 socket still works while the lift is idle.
+//
+// liftB is direction and distance only - the speed is controllerB's, set
+// through CTRL0 (BR<dddd>) before the move and changeable during it. A
+// start with a zero demand is refused. Mid-move, leave CTRL0's direction
+// alone and do not set the speed to zero - either can stall the move or
+// cut it short; stop the lift instead (LIFT0 BX). See Speed in Lift.hpp.
 //
 // Distance is tachoB edges, PULSES_PER_REV (2) per revolution - see
 // Tachometer::getEdges() for why not revolutions.
 //
 // LIFTB_FORWARD_DIRECTION is the controller direction that moves the
 // lift forward. Swap it if the lift is mounted the other way round.
-#define LIFTB_SPEED_RPM          150U
 #define LIFTB_FORWARD_DIRECTION  ControllerDirection::forward
 
-Lift liftB(&controllerB, LIFTB_FORWARD_DIRECTION, LIFTB_SPEED_RPM,
+Lift liftB(&controllerB, LIFTB_FORWARD_DIRECTION,
            []() -> uint32_t { return tachoB.getEdges(); });
 
 // A lift command, parsed by liftSockReceiveHandler() in serLink2Task and
@@ -853,6 +905,11 @@ void initTasks()
      set speed command arrives. Before controlBTask exists, like tachoB. */
   controllerB.init();
 
+  /* A demand without enable(): the motor stays still, but a lift start
+     now has a speed to run at from boot (Lift::start() refuses a zero
+     demand). CTRL0 BR<dddd> replaces it. */
+  controllerB.setRequiredRpm(CONTROLB_BOOT_RPM);
+
   /* Only validates - the lift is idle until a start command. Its command
      queue is created here, with it, so both exist before controlBTask
      can drain one or the LIFT0 socket (acquired below, with SerLink2)
@@ -870,9 +927,10 @@ void initTasks()
      by motorSockInstantHandler (in reader0Task, so the answer rides back
      on the ack).
 
-     Order against reader0.init() no longer matters - Reader sets its
-     instant handler table up in its constructor - but this stays next to
-     the reader/writer setup it depends on. Still before the scheduler
+     Order against reader0.init() does not matter - the socket keeps its
+     own instant handler, and reader0 finds it through transport0 (see
+     Instant handling in Socket.hpp) - but this stays next to the
+     reader/writer setup it depends on. Still before the scheduler
      starts, so no task can see the socket half-registered.
 
      transport0 holds eight of the SERLINK_CONFIG__MAX_SOCKETS slots -
@@ -1424,6 +1482,12 @@ bool motorSockInstantHandler(SerLink::Frame &rxFrame, uint16_t* dataLen, char* d
 //     CTRL0T523003BDF      direction = forward
 //     CTRL0T523003BDR      direction = reverse
 //     CTRL0T523003BDD      direction = disabled (idle - the motor coasts)
+//     CTRL0T516008BI002000 integral gain = 0.002 - six digits, in
+//                          millionths (000000..999999, so 0..0.999999).
+//                          Takes effect on the next pass, enabled or not;
+//                          the output carries on from where it is. Lasts
+//                          until reset - CONTROLB_INTEGRAL_GAIN is the
+//                          boot value
 //
 //   Reads. Handled by controlSockInstantHandler(), answered on the ack:
 //
@@ -1431,11 +1495,21 @@ bool motorSockInstantHandler(SerLink::Frame &rxFrame, uint16_t* dataLen, char* d
 //     CTRL0T529003BGD  ->  CTRL0A529001F      direction, one of F/R/D
 //     CTRL0T529003BGF  ->  CTRL0A5290011      tacho fault, 1 or 0 - 1 once
 //                          the controller has stopped the motor because
-//                          tachoB read zero for CONTROLB_TACHO_TIMEOUT_S.
+//                          tachoB read zero for CONTROLB_TACHO_TIMEOUT_S
+//                          with the duty at or above
+//                          CONTROLB_TACHO_CHECK_MIN_PERCENT.
 //                          Cleared by the next speed set (BR<dddd>).
+//     CTRL0T529003BGI  ->  CTRL0A529006002000  integral gain, millionths -
+//                          same format the set takes
+//     CTRL0T529003BGA  ->  CTRL0A529016002000.0150.0148
+//                          all at once: <gain>.<required>.<measured> -
+//                          integral gain (6 digits, millionths), required
+//                          RPM (4) and measured RPM (4, clamped at 9999).
+//                          One read, so the three are from the same moment
 //
 //   Status. Sent unsolicited by controlBTask every
-//   TACHO_PUBLISH_PERIOD_MS, as 'U' (no ack expected):
+//   TACHO_PUBLISH_PERIOD_MS while liftB is moving, as 'U' (no ack
+//   expected):
 //
 //     CTRL0U001008030.0350   motorB duty 30%, tachoB 350 RPM
 //
@@ -1460,9 +1534,17 @@ bool motorSockInstantHandler(SerLink::Frame &rxFrame, uint16_t* dataLen, char* d
 #define CONTROL_CMD_MIN_LEN        2U   // <ctl><cmd>
 #define CONTROL_CMD_SET_RPM_LEN    6U   // <ctl>R<dddd>
 #define CONTROL_CMD_DIRECTION_LEN  3U   // <ctl>D<F|R|D>
-#define CONTROL_CMD_GET_LEN        3U   // <ctl>G<R|D|F>
+#define CONTROL_CMD_SET_GAIN_LEN   8U   // <ctl>I<dddddd>
+#define CONTROL_CMD_GET_LEN        3U   // <ctl>G<R|D|F|I|A>
 #define CONTROL_RPM_FIELD_WIDTH    4U
 #define CONTROL_PWM_FIELD_WIDTH    3U   // status frame duty cycle, 0..100
+
+// Integral gain on the wire: an integer number of millionths, so the
+// socket never has to parse or print a float. 1e-6 is far finer than any
+// useful step (the boot value is 0.002 = 002000).
+#define CONTROL_GAIN_FIELD_WIDTH   6U
+#define CONTROL_GAIN_FIELD_MAX     999999U
+#define CONTROL_GAIN_SCALE         1000000.0f
 
 // Same letters as the MOTOR socket's direction commands, D for disabled
 // meaning idle.
@@ -1485,6 +1567,19 @@ static char controlDirectionToChar(ControllerDirection direction)
     case ControllerDirection::reverse: return 'R';
     default:                           return 'D';
   }
+}
+
+// The integral gain as CONTROL_GAIN_FIELD_WIDTH digits of millionths, no
+// NUL. Rounded, so 0.002 set as 002000 reads back as 002000 despite the
+// float in between. Clamped: a gain given in the config can be up to
+// Controller::MAX_INTEGRAL_GAIN (1.0), one digit wider than the field, and
+// writeUintField() would otherwise keep only its low digits.
+static void writeGainField(float gain, char* dst)
+{
+  uint32_t micro = (uint32_t)((gain * CONTROL_GAIN_SCALE) + 0.5f);
+  if(micro > CONTROL_GAIN_FIELD_MAX) { micro = CONTROL_GAIN_FIELD_MAX; }
+
+  writeUintField(micro, CONTROL_GAIN_FIELD_WIDTH, dst);
 }
 
 // The sets. Runs in serLink0Task after the ack has gone out, so a
@@ -1531,6 +1626,21 @@ void controlSockReceiveHandler(const char* data, uint16_t dataLen)
       break;
     }
 
+    case 'I':   // <ctl>I<dddddd> - set integral gain, in millionths
+    {
+      uint32_t micro;
+
+      /* setIntegralGain() range checks too, but six digits cannot leave
+         0..0.999999, which is inside its range - so a refusal here can only
+         be a malformed field, dropped like any other. */
+      if((dataLen == CONTROL_CMD_SET_GAIN_LEN) &&
+         readUintField(&data[2], CONTROL_GAIN_FIELD_WIDTH, &micro))
+      {
+        (void)controller->setIntegralGain((float)micro / CONTROL_GAIN_SCALE);
+      }
+      break;
+    }
+
     case 'G':   // reads are answered on the ack, in controlSockInstantHandler()
     default:
       break;
@@ -1570,6 +1680,34 @@ bool controlSockInstantHandler(SerLink::Frame &rxFrame, uint16_t* dataLen, char*
       *dataLen = 1U;
       return true;
 
+    case 'I':   // integral gain in millionths, 6 digits - same format the set takes
+      writeGainField(controller->getIntegralGain(), data);
+      *dataLen = CONTROL_GAIN_FIELD_WIDTH;
+      return true;
+
+    case 'A':   // <gain>.<required>.<measured> - see the CTRL0 notes
+    {
+      /* writeUintField() keeps only the low digits, so clamp the measured
+         speed to the field rather than report an unrelated number - a
+         faulty tacho can read up to 65535. The required speed was set
+         through a 4 digit field, so it always fits. */
+      uint32_t rpm = controller->getRpm();
+      if(rpm > 9999U) { rpm = 9999U; }
+
+      uint16_t len = 0U;
+      writeGainField(controller->getIntegralGain(), &data[len]);
+      len += CONTROL_GAIN_FIELD_WIDTH;
+      data[len++] = '.';
+      writeUintField(controller->getRequiredRpm(), CONTROL_RPM_FIELD_WIDTH, &data[len]);
+      len += CONTROL_RPM_FIELD_WIDTH;
+      data[len++] = '.';
+      writeUintField(rpm, CONTROL_RPM_FIELD_WIDTH, &data[len]);
+      len += CONTROL_RPM_FIELD_WIDTH;
+
+      *dataLen = len;
+      return true;
+    }
+
     default:
       return false;
   }
@@ -1590,7 +1728,9 @@ bool controlSockInstantHandler(SerLink::Frame &rxFrame, uint16_t* dataLen, char*
 //     LIFT0U645002BX       stop - the motor coasts
 //
 //   A start while the lift is moving is ignored - stop it first. So is a
-//   distance of zero.
+//   distance of zero, and so is any start while controllerB's required
+//   speed is zero (it boots at CONTROLB_BOOT_RPM): the speed is set through CTRL0
+//   (BR<dddd>), not here - see Speed in Lift.hpp.
 //
 //   Read. Handled by liftSockInstantHandler(), answered on the ack, so it
 //   must be sent as 'T':
@@ -1852,14 +1992,23 @@ void startControlBTask(void *argument)
 
       /* 'U': fire and forget, same reasoning as TACHO. Sent on both
          links, uart2 and MQTT - over MQTT it is simply dropped while
-         mqtt2 is not connected. */
-      if(controlSocket != nullptr)
+         mqtt2 is not connected.
+
+         Only while liftB is moving, so an idle board keeps the console
+         quiet. liftBStatus is this pass's, taken after liftB.run(), so
+         the pass a move ends sends the LIFT0 done frame above instead.
+         A closed loop run started from CTRL0 or MOTOR, with no lift
+         move, is not reported - read it with CTRL0T529003BGR. */
+      if(liftBStatus == Lift::status::moving)
       {
-        controlSocket->sendData(statusData, (uint16_t)sizeof(statusData), false);
-      }
-      if(controlMqttSocket != nullptr)
-      {
-        controlMqttSocket->sendData(statusData, (uint16_t)sizeof(statusData), false);
+        if(controlSocket != nullptr)
+        {
+          controlSocket->sendData(statusData, (uint16_t)sizeof(statusData), false);
+        }
+        if(controlMqttSocket != nullptr)
+        {
+          controlMqttSocket->sendData(statusData, (uint16_t)sizeof(statusData), false);
+        }
       }
 
       if(tachoSocket != nullptr)

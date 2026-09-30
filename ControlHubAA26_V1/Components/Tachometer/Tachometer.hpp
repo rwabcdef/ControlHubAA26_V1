@@ -116,18 +116,30 @@
 // Moving average: the reading is taken over the most recent this-many
 // whole revolutions (total revolutions / total time), updated at every
 // revolution rather than at every update(). More is smoother but slower
-// to follow a change - the window is AVG_REVS revolutions long, so ~1 s
-// at 240 RPM with 4. A control loop sees that as lag. Limited to 16 to
-// keep the arithmetic in update() inside 32 bits.
-#define TACHO__AVG_REVS 4
+// to follow a change - the window is AVG_REVS revolutions long, so 2.4 s
+// at 50 RPM with 2 (it was 4, and 4.8 s). A control loop sees that as
+// lag, and at the low speeds a lift runs at it dominates. Whole
+// revolutions, so it means the same whatever PULSES_PER_REV is. Limited
+// to 16 to keep the arithmetic in update() inside 32 bits.
+#define TACHO__AVG_REVS 2
 
 static_assert((TACHO__AVG_REVS >= 1) && (TACHO__AVG_REVS <= 16),
   "TACHO__AVG_REVS must be 1..16");
 
 // No edge for this long means stopped. Must be longer than the slowest
 // pulse interval the motor can legitimately produce, or a slow crawl
-// reads as a stall: at 2 pulses/rev this is 60 RPM.
-#define TACHO__STALL_TIMEOUT_MS 500
+// reads as a stall - the reading drops to zero between edges, and a
+// controller holding that speed surges instead.
+//
+// The slowest readable speed is set by the LONGEST gap between magnets,
+// not the average: with 2 magnets split ~45/55 that is 0.55 rev, so
+//   floor ~= 0.55 * 60000 / TACHO__STALL_TIMEOUT_MS  RPM
+// 500 ms gave ~66 RPM, which 50 RPM demands fell under. 2000 ms gives
+// ~17 RPM (~9 RPM with 4 magnets at 90 degrees, longest gap ~0.3 rev).
+//
+// The cost: after a real stop, the last speed is reported for up to this
+// long before it drops to zero.
+#define TACHO__STALL_TIMEOUT_MS 2000
 
 // Numerically at or below configLIBRARY_MAX_SYSCALL_INTERRUPT_PRIORITY,
 // which is what makes the xQueueSendFromISR() in onEdge() legal. Matches

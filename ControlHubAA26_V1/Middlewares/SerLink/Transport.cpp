@@ -16,6 +16,23 @@ void Transport::init(QueueHandle_t queue, onReceiveCallback receiveCallback,
   this->queue = queue;
   this->receiveCallback = receiveCallback;
   this->ackCallback = ackCallback;
+
+  /* Here rather than in the constructor: both are file scope objects, and
+     the Reader's own constructor may run after ours. */
+  this->reader->setTransport(this);
+}
+
+Socket* Transport::findSocket(char* protocol)
+{
+  for(uint8_t i = 0; i < SERLINK_CONFIG__MAX_SOCKETS; i++)
+  {
+    if(this->sockets[i].isAcquired() && this->sockets[i].matchesProtocol(protocol))
+    {
+      return &this->sockets[i];
+    }
+  }
+
+  return nullptr;
 }
 
 void Transport::run()
@@ -102,16 +119,11 @@ bool Transport::sendFrame(Frame* frame)
 
 Socket* Transport::acquireSocket(char* protocol, onReceiveCallback callback, readHandler instantHandler)
 {
-  if(instantHandler != nullptr)
-  {
-    this->reader->registerInstantCallback(protocol, instantHandler);
-  }
-
   for(uint8_t i = 0; i < SERLINK_CONFIG__MAX_SOCKETS; i++)
   {
     if(!this->sockets[i].isAcquired())
     {
-      this->sockets[i].init(protocol, this, callback);
+      this->sockets[i].init(protocol, this, callback, instantHandler);
       return &this->sockets[i];
     }
   }

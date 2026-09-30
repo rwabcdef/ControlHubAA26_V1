@@ -2,9 +2,10 @@
  * Lift.hpp
  *
  * A lift, driven through one speed Controller: move so far in a given
- * direction, at a fixed speed, then stop.
+ * direction, then stop. Direction and distance only - the speed is the
+ * controller's business.
  *
- *   start(d, distance) --> controller: speedRpm, direction, enable
+ *   start(d, distance) --> controller: direction, enable
  *   run(), each pass   --> travelled = getDistance() - startDistance
  *                          travelled >= distance?  --> stop()
  *                      --> controller.run() (or hold() while idle)
@@ -16,11 +17,11 @@
  * here, next to the distance check, rather than in the task.
  *
  * The controller is run whether a move is in progress or not, so
- * anything else still using it directly (the CTRL0 socket, for now)
- * keeps working while the lift is idle. It will fight a move, though:
- * a direction or enable change from outside mid-move is not noticed,
- * and the move then only ends when the distance comes up. Lift should
- * be the controller's only user.
+ * anything else using it directly (the CTRL0 socket) keeps working while
+ * the lift is idle. Mid-move, only its speed should be touched: a
+ * direction or enable change from outside is not noticed, and the move
+ * then only ends when the distance comes up (or never, if it stops the
+ * motor - stop the lift instead).
  *
  * Direction
  * ---------
@@ -31,9 +32,15 @@
  *
  * Speed
  * -----
- * Every move runs at speedRpm, given at construction. start() sets it on
- * the controller each time, so a speed set on the controller some other
- * way lasts only until the next move.
+ * Not the lift's concern. A move runs at whatever speed the controller
+ * has been given (Controller::setRequiredRpm(), e.g. through CTRL0), and
+ * start() leaves it alone - so set the speed first, and it can be
+ * changed mid-move too. start() does refuse a zero demand, though: the
+ * controller would hold the motor still, and a move that can never
+ * cover its distance would sit "moving" for ever (the tacho timeout
+ * does not catch it - zero speed is what was asked for). For the same
+ * reason, setting the demand to zero mid-move leaves the move stuck
+ * until stop().
  *
  * Distance
  * --------
@@ -87,22 +94,23 @@ class Lift
     // main(), when neither the HAL nor the RTOS exists.
     //
     // forwardDirection is the controller direction that moves the lift
-    // forward - forward or reverse, never idle. speedRpm is the speed of
-    // every move. getDistance is a plain function pointer, as in
-    // ControllerConfig, so a captureless lambda will do.
+    // forward - forward or reverse, never idle. getDistance is a plain
+    // function pointer, as in ControllerConfig, so a captureless lambda
+    // will do.
     Lift(Controller* controller, ControllerDirection forwardDirection,
-         uint16_t speedRpm, uint32_t (*getDistance)());
+         uint32_t (*getDistance)());
     virtual ~Lift() = default;
 
     // Validates the arguments. Returns false, and the lift stays idle
-    // and refuses every start(), if controller or getDistance is null,
-    // forwardDirection is idle, or speedRpm is zero. run() still runs
-    // the controller if there is one.
+    // and refuses every start(), if controller or getDistance is null, or
+    // forwardDirection is idle. run() still runs the controller if there
+    // is one.
     bool init();
 
     // Starts a move of distance units (see Distance, above) in d.
     // Returns false, and changes nothing, if the lift is already moving,
-    // distance is zero, or init() did not pass.
+    // distance is zero, the controller's required speed is zero (see
+    // Speed, above), or init() did not pass.
     bool start(direction d, uint32_t distance);
 
     // Ends the move: disables the controller and idles the motor, which
@@ -118,12 +126,10 @@ class Lift
     status   getStatus() const;
     uint32_t getTravelled() const;   // since the last start()
     uint32_t getTarget() const;      // the last start()'s distance
-    uint16_t getSpeedRpm() const;
 
   protected:
     Controller*         controller;
     ControllerDirection forwardDirection;
-    uint16_t            speedRpm;
     uint32_t          (*getDistance)();
 
     // The controller direction that moves the lift in d.

@@ -96,7 +96,8 @@ the codebase. An ASCII frame is:
 LED01 T   492   002  A1
 \___/ |   \_/   \_/  \_/
 proto type roll  len  data     ('T' = needs ack, 'U' = fire-and-forget,
-(5 ch)               (<=64)     'A' = ack, 'B' = relay ack; ACK_OK = 900)
+(5 ch)               (<=64)     'A' = ack, 'B' = relay ack, 'S' = system
+                                request; ACK_OK = 900)
 ```
 
 Layers, bottom to top (`Frame` ↔ `Reader`/`Writer` ↔ `Transport` ↔ `Socket`):
@@ -123,7 +124,16 @@ The two handler kinds matter and are easy to confuse:
 - **receive callback** runs in the *Transport* task, after the ack has already gone out —
   so a malformed command is dropped silently, with no way to report it. Use for writes/sets.
 - **instant handler** runs in the *Reader* task, before the ack is sent, and its output
-  rides back inside the ack frame. Use for reads/queries.
+  rides back inside the ack frame. Use for reads/queries. The socket keeps it:
+  the Reader finds the socket via `Transport::findSocket()` and calls
+  `Socket::onInstant()`, so there is no limit on how many sockets have one.
+
+`'S'` frames are requests to the SerLink layer itself. `Socket::onInstant()` answers them
+on an ordinary `'A'` ack, and they are never passed on to the receive callback or a relay.
+The only command so far is `PROTOS<rrr>004PING` → `PROTOA<rrr>008PINGBACK`. A plain
+`ACK_OK` means there is no socket for that protocol, and no answer means the link is down.
+The replies are always `'A'`, never `'S'`, so two nodes that both handle `'S'` can't
+ping-pong. `Socket.hpp` has the details.
 
 ### Three SerLink instances, and the relay
 
@@ -196,20 +206,26 @@ every `CONTROLB_PERIOD_MS` (50 ms).
   enables it; a MOTOR `P` (set percent) command disables it. Two safety limits cover a
   dead or unplugged tacho, which reads zero and would wind the output to its maximum:
   `outputMaxPercent` (50% for motorB) caps the duty, and `tachoUnresponsiveTimeout_S`
-  (10 s) disables the controller, writes 0%, sets idle and latches `isTachoFault()`
+  (10 s, counted only once the duty reaches `tachoCheckMinPercent`, 20%, so a slow
+  low-gain ramp never trips it) disables the controller, writes 0%, sets idle and latches `isTachoFault()`
   (CTRL0 `BGF`). A Lift move in progress ends short. The next enable clears the fault.
-- **`Lift`** — move-by-distance (in tacho edges) at `LIFTB_SPEED_RPM` on top of the
-  controller. `liftB.run()` also runs the controller, so `controlBTask` calls only
-  `liftB.run()`. LIFT0 commands arrive in the serLink2 task and reach `controlBTask`
-  via `liftCmdQueue`, never by direct calls. CTRL0 still works while the lift is idle,
-  but a CTRL0 command during a move can stall it or cut it short.
+- **`Lift`** — direction and distance only (in tacho edges), on top of the controller.
+  **Speed is purely the controller's concern.** `Lift` never sets it: a move runs at
+  whatever CTRL0 `BR<dddd>` last set, and that can be changed mid-move. `start()`
+  refuses a zero demand, because the move could never finish. controllerB boots with a
+  demand of `CONTROLB_BOOT_RPM` (100), set in `initTasks()` without enabling it.
+  `liftB.run()` also runs the controller, so `controlBTask` calls only `liftB.run()`.
+  LIFT0 commands arrive in the serLink2 task and reach `controlBTask` via
+  `liftCmdQueue`, never by direct calls. During a move, a CTRL0 direction change or a
+  zero speed can stall the move or cut it short.
 - **`Adc`** — ADC1 scans PA0/PA3/PA4/PA5 by DMA into a circular buffer, triggered by TIM2,
   and averages each half buffer. PA3 is the motorB current sense, which is RC-filtered on
   the board — fine for monitoring, too slow for overcurrent protection.
 
 `controlBTask` publishes TACHO (`'U'`, no ack) every `TACHO_PUBLISH_PERIOD_MS`, which
-must be a whole multiple of `CONTROLB_PERIOD_MS` (enforced by a `static_assert`), and a
-CTRL0 status frame on both uart2 and MQTT.
+must be a whole multiple of `CONTROLB_PERIOD_MS` (enforced by a `static_assert`). While a
+liftB move is in progress (only then), it also sends a CTRL0 status frame on both uart2
+and MQTT.
 
 ### Task stacks
 
@@ -255,7 +271,7 @@ LIFT0 exists only on SerLink2, so it has to go over MQTT (`mosquitto_pub` to
   header of each such class — read it before calling a driver from a new task.
 - Tuning constants are `#define`s grouped with the object they configure at the top of
   `main_tasks.cpp` (radio channel/payload, MQTT broker/topics/period, motor PWM frequency
-  and start percent, controller gain/limits, lift speed, tacho publish period). Protocol-wide limits live in the `*_config.hpp` files under
+  and start percent, controller gain/limits/tacho timeout, lift forward direction, tacho publish period). Protocol-wide limits live in the `*_config.hpp` files under
   `Middlewares/SerLink/`.
 - Header comments in this codebase carry the design rationale — the *why*, the datasheet
   reference, the threading contract. Match that when adding code.

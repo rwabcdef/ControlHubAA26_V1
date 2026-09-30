@@ -40,9 +40,16 @@ namespace SerLink {
       Transport(Writer* writer, Reader *reader);
 
       // Assigns the (already-created) dispatch queue. Must be called once,
-      // before queue is used.
+      // before queue is used. Also hands this Transport to its Reader, which
+      // looks sockets up through findSocket() - so call it before the
+      // Reader's task runs.
       void init(QueueHandle_t queue, onReceiveCallback receiveCallback = nullptr,
         onReceiveCallback ackCallback = nullptr);
+
+      // The acquired socket for protocol, or nullptr. Called from the
+      // Reader's task (to answer on the ack - see Instant handling in
+      // Socket.hpp) as well as from run().
+      Socket* findSocket(char* protocol);
 
       // Services one message from queue: routes received (TYPE_RX) frames
       // to whichever acquired socket matches their protocol, and forwards
@@ -55,6 +62,10 @@ namespace SerLink {
       // run() to forward to the writer. Returns whether it was accepted.
       bool sendFrame(Frame* frame);
 
+      // instantHandler answers this socket's 'T' reads on the ack; it is
+      // kept by the socket itself (see Socket::onInstant()), so there is no
+      // separate limit on how many sockets can have one. Returns nullptr,
+      // silently, once all SERLINK_CONFIG__MAX_SOCKETS are taken.
       Socket* acquireSocket(char* protocol, onReceiveCallback callback = nullptr,
         readHandler instantHandler = nullptr);
   };

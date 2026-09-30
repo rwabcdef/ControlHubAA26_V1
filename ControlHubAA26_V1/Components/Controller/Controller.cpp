@@ -10,7 +10,7 @@
 #include "task.h"
 
 Controller::Controller(const ControllerConfig& config)
-: config(config), requiredRpm(0U), enabled(false), rejectedCount(0U),
+: config(config), requiredRpm(0U), integralGain(config.integralGain), enabled(false), rejectedCount(0U),
   tachoFault(false), driving(false), valid(false), output(0.0f),
   zeroRpmPasses(0U), zeroRpmLimitPasses(0U)
 {
@@ -27,7 +27,9 @@ bool Controller::init()
           (config.getDirection != nullptr) &&
           (config.outputMinPercent <= config.outputMaxPercent) &&
           (config.outputMaxPercent <= 100U) &&
-          ((config.tachoUnresponsiveTimeout_S == 0U) || (config.periodMs > 0U));
+          (config.integralGain >= 0.0f) && (config.integralGain <= MAX_INTEGRAL_GAIN) &&
+          ((config.tachoUnresponsiveTimeout_S == 0U) ||
+           ((config.periodMs > 0U) && (config.tachoCheckMinPercent <= config.outputMaxPercent)));
 
   /* The timeout counted in run() passes, rounded up so it is never
      shorter than asked for. uint32_t: 65535 s in ms still fits. */
@@ -70,12 +72,16 @@ void Controller::run()
     return;
   }
 
-  /* A zero reading against a non-zero demand, for too long: the
+  /* A zero reading against a non-zero demand, for too long, while the
+     output is high enough that the motor should be turning: the
      tachometer is dead or unplugged, and the law would otherwise sit at
-     outputMaxPercent indefinitely. Checked before the law runs, so the
+     outputMaxPercent indefinitely. Below tachoCheckMinPercent the output
+     is still ramping up to breakaway, and a zero is expected - however
+     long a low gain makes that take. Checked before the law runs, so the
      tripping pass writes nothing but the stop. See Unresponsive
      tachometer in Controller.hpp. */
-  if((zeroRpmLimitPasses > 0U) && (rpm == 0U) && (requiredRpm > 0U))
+  if((zeroRpmLimitPasses > 0U) && (rpm == 0U) && (requiredRpm > 0U) &&
+     (output >= (float)config.tachoCheckMinPercent))
   {
     if(++zeroRpmPasses >= zeroRpmLimitPasses)
     {
@@ -130,6 +136,25 @@ uint16_t Controller::getRequiredRpm() const
   return requiredRpm;
 }
 
+bool Controller::setIntegralGain(float gain)
+{
+  /* Written this way round so NaN - which compares false with everything -
+     is refused rather than stored. A negative gain would be positive
+     feedback: the output would run away from the demand. */
+  if(!((gain >= 0.0f) && (gain <= MAX_INTEGRAL_GAIN)))
+  {
+    return false;
+  }
+
+  integralGain = gain;
+  return true;
+}
+
+float Controller::getIntegralGain() const
+{
+  return integralGain;
+}
+
 void Controller::enable()
 {
   enabled = true;
@@ -164,6 +189,11 @@ ControllerDirection Controller::getDirection() const
 uint8_t Controller::getPwmPercent() const
 {
   return valid ? config.getPwmPercent() : 0U;
+}
+
+uint16_t Controller::getRpm() const
+{
+  return valid ? config.getRpm() : 0U;
 }
 
 uint8_t Controller::getOutputPercent() const
@@ -221,7 +251,8 @@ void Controller::stopForTachoFault()
 float Controller::computeOutput(int32_t errorRpm, uint16_t rpm, float output)
 {
   (void)rpm;
-  return output + (config.integralGain * (float)errorRpm);
+  /* The live gain, not config.integralGain - see setIntegralGain(). */
+  return output + (integralGain * (float)errorRpm);
 }
 
 void Controller::onReset()

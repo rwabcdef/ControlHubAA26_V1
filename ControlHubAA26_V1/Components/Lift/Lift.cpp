@@ -8,9 +8,9 @@
 #include "Lift.hpp"
 
 Lift::Lift(Controller* controller, ControllerDirection forwardDirection,
-           uint16_t speedRpm, uint32_t (*getDistance)())
+           uint32_t (*getDistance)())
 : controller(controller), forwardDirection(forwardDirection),
-  speedRpm(speedRpm), getDistance(getDistance),
+  getDistance(getDistance),
   valid(false), started(false), startDistance(0U),
   state(status::idle), travelled(0U), target(0U)
 {
@@ -20,15 +20,18 @@ bool Lift::init()
 {
   valid = (controller != nullptr) &&
           (getDistance != nullptr) &&
-          (forwardDirection != ControllerDirection::idle) &&
-          (speedRpm > 0U);
+          (forwardDirection != ControllerDirection::idle);
 
   return valid;
 }
 
 bool Lift::start(direction d, uint32_t distance)
 {
-  if(!valid || (state == status::moving) || (distance == 0U))
+  /* A zero demand would enable a controller that holds the motor still,
+     leaving a move that can never finish - see Speed in Lift.hpp. Only
+     read here: the speed is the controller's, set by whoever set it. */
+  if(!valid || (state == status::moving) || (distance == 0U) ||
+     (controller->getRequiredRpm() == 0U))
   {
     return false;
   }
@@ -38,11 +41,10 @@ bool Lift::start(direction d, uint32_t distance)
   travelled = 0U;
   target = distance;
 
-  /* Speed, then direction, then enable, so the controller's first pass
-     already has everything it needs. It seeds its output from the
-     motor's present duty cycle (Bumpless start, Controller.hpp), which
-     after a previous move is roughly the duty speedRpm needed then. */
-  controller->setRequiredRpm(speedRpm);
+  /* Direction, then enable, so the controller's first pass already has
+     everything it needs - the speed it already has. It seeds its output
+     from the motor's present duty cycle (Bumpless start, Controller.hpp),
+     which after a previous move at a similar speed is roughly right. */
   controller->setDirection(toControllerDirection(d));
   controller->enable();
 
@@ -124,11 +126,6 @@ uint32_t Lift::getTravelled() const
 uint32_t Lift::getTarget() const
 {
   return target;
-}
-
-uint16_t Lift::getSpeedRpm() const
-{
-  return speedRpm;
 }
 
 ControllerDirection Lift::toControllerDirection(direction d) const

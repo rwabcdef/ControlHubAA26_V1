@@ -19,6 +19,14 @@ public:
   static const char TYPE_UNIDIRECTION = 'U';
   static const char TYPE_ACK = 'A';
   static const char TYPE_RELAY_ACK = 'B';
+
+  // A request to the SerLink layer itself, not to the socket's owner:
+  // answered by the receiving Socket (Socket::onInstant()) on an ordinary
+  // 'A' ack, and never passed on to the socket's receive callback or
+  // relay. Only ever a request - the answer is always an 'A', so two
+  // nodes that both handle 'S' cannot ping-pong. See Socket.hpp for the
+  // commands (PING).
+  static const char TYPE_SYSTEM = 'S';
   static const int LEN_PROTOCOL = 5;
   static const int LEN_TYPE = 1;
   static const int LEN_ROLLCODE = 3;

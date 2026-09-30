@@ -25,6 +25,10 @@
  namespace SerLink
  {
 
+ // Only used as a pointer here - forward declared (rather than #included)
+ // to avoid a Reader.hpp <-> Transport.hpp circular include.
+ class Transport;
+
  //typedef void (*readHandler)(const TransportData* pRxData, TransportData* pAckData);
  /*
  typedef void (*reader_uart_init)(char* pRxBuffer, uint8_t rxBufferLen);
@@ -42,12 +46,6 @@
  class Reader : public StateMachine
  {
  private:
-   class HandlerRegistration{
-   public:
-     char protocol[Frame::LEN_PROTOCOL];
-     readHandler handler;
-   };
- 
      //const uint8_t IDLE = 0;
      //const uint8_t ACKDELAY = 1;
      //const uint8_t TXACKWAIT = 2;
@@ -82,8 +80,10 @@
      FrameMsg rxFrameMsg;
      Frame ackFrame;
      TickType_t ackDelayStartTick; // captured in idle() at the point of transition to ACKDELAY
-     HandlerRegistration handlerRegistrations[READER_CONFIG__MAX_NUM_INSTANT_HANDLERS];
-     uint8_t numInstantHandlers;
+     // Set by Transport::init(). Where a received 'T' or 'S' frame's socket
+     // is looked up, so the socket can put its answer on the ack - see
+     // Instant handling in Socket.hpp. nullptr: every ack is a plain ACK_OK.
+     Transport* transport = nullptr;
  
      uint8_t idle();
      uint8_t ackDelay();
@@ -106,8 +106,6 @@
  
  
  
-     readHandler getInstantHandler(char* protocol);
- 
  public:
     //  Reader(uint8_t id, char* rxBuffer, char* ackBuffer, uint8_t bufferLen,
     //      Frame* rxFrame, Frame* ackFrame, Writer* writer = nullptr); // , DebugPrint* debugPrint = nullptr
@@ -122,7 +120,8 @@
    // plain nullptr argument ambiguous. Call before the scheduler starts.
    void setAckWriteFunc(WriteDataFunc ackWrite);
      void run();
-     bool registerInstantCallback(char* protocol, readHandler handler);
+     // Called by Transport::init() - see transport, above.
+     void setTransport(Transport* transport);
      bool getRxFrame(Frame* rxFrame);
    bool getRxFrameProtocol(Frame* rxFrame, char* protocol);
    void clearRxFlag();

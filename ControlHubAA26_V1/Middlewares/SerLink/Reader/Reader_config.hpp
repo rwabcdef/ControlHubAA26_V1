@@ -10,8 +10,6 @@
 
 #define READER_CONFIG__READER0
 
-#define READER_CONFIG__MAX_NUM_INSTANT_HANDLERS 5
-
 //----------------------------------------------------------
 // READER0
 #ifdef READER_CONFIG__READER0

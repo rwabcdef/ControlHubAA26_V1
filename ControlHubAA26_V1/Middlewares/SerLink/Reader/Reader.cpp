@@ -1,6 +1,8 @@
 
 
 #include "Reader.hpp"
+#include "Transport.hpp"
+#include "Socket.hpp"
 #include "uart2.h"
 #include "task.h"
 #include <string.h>
@@ -18,20 +20,10 @@ Reader::Reader(uint8_t id): id(id)
 {
   this->currentState = IDLE;
 
-  /* The instant handler table is set up here rather than in init(),
-     because registration does not have to wait for init(): Transport
-     registers a handler from acquireSocket(), and a caller that acquires
-     a socket before init()ing the reader is doing nothing wrong. Zeroing
-     it in init() instead silently discarded those registrations, leaving
-     the socket working for sends while every instant read fell back to a
-     plain ACK_OK.
-
-     Zeroing the whole table, not just the count, also keeps
-     getInstantHandler() honest - it scans all MAX_NUM_INSTANT_HANDLERS
-     entries rather than stopping at numInstantHandlers, so the unused
-     ones have to hold a protocol that cannot match. */
-  this->numInstantHandlers = 0;
-  memset(this->handlerRegistrations, 0, sizeof(this->handlerRegistrations));
+  /* No instant handler table here any more: each Socket keeps its own,
+     and the Reader finds the socket through Transport (setTransport()).
+     transport is left alone - its default member initialiser has already
+     set it, and Transport::init() may set it before init() below. */
 }
 
 void Reader::init(QueueHandle_t uartRxQueue, Writer* writer, QueueHandle_t consumerQueue,
@@ -42,8 +34,13 @@ void Reader::init(QueueHandle_t uartRxQueue, Writer* writer, QueueHandle_t consu
   this->writer = writer;
   this->consumerQueue = consumerQueue;
 
-  // numInstantHandlers is deliberately NOT reset here - see the
-  // constructor. Handlers may already be registered by this point.
+  // transport is deliberately NOT touched here - Transport::init() sets it,
+  // and is usually called first.
+}
+
+void Reader::setTransport(Transport* transport)
+{
+  this->transport = transport;
 }
 
 void Reader::setAckWriteFunc(WriteDataFunc ackWrite)
@@ -71,40 +68,34 @@ uint8_t Reader::idle()
     // Convert received message from uart layer to Frame.
     Frame::fromString(this->rxMsg.data, &this->rxFrame);
 
-    if(this->rxFrame.type == Frame::TYPE_TRANSMISSION)
+    if((this->rxFrame.type == Frame::TYPE_TRANSMISSION) ||
+       (this->rxFrame.type == Frame::TYPE_SYSTEM))
     {
-
+      // Both are acked the same way. The difference is what happens after:
+      // a 'T' frame goes on to the consumer, an 'S' frame does not - see
+      // txAck().
       this->rxFrame.copy(&this->ackFrame);
-			this->ackFrame.type = Frame::TYPE_ACK;
-			this->ackFrame.dataLen = Frame::ACK_OK;
-			memset(this->ackFrame.data, 0, Frame::MAX_DATALEN);
+      this->ackFrame.type = Frame::TYPE_ACK;
+      this->ackFrame.dataLen = Frame::ACK_OK;
+      memset(this->ackFrame.data, 0, Frame::MAX_DATALEN);
 
-      readHandler instantHandler = this->getInstantHandler(this->rxFrame.protocol);
-			if(instantHandler == nullptr)
-			{
-			  // No instant (i.e. piggyback) handler has been found - so do nothing.
-			}
-      else
-			{
-			  // An instant (i.e. piggyback) handler has been found for this protocol,
-			  // so call it now.
-			  // The instant handler callback sets the ackFrame's data & dataLen.
-			  bool useReturn = instantHandler(this->rxFrame, &this->ackFrame.dataLen, this->ackFrame.data);
+      // The socket decides what, if anything, rides back on the ack - its
+      // instant handler for a 'T', its system commands (PING) for an 'S'.
+      // No socket for this protocol, or no Transport: a plain ACK_OK, which
+      // is also how a PING tells "no such socket" from "link down".
+      Socket* socket = (this->transport != nullptr)
+                       ? this->transport->findSocket(this->rxFrame.protocol)
+                       : nullptr;
 
-        if(!useReturn)
-			  {
-			    // do not use data length and data in ack frame that was set by the instantHandler
-			    this->ackFrame.type = Frame::TYPE_ACK;
-				  this->ackFrame.dataLen = Frame::ACK_OK;
-			  }
-			  else
-			  {
-			    // do nothing - use data length and data in ack frame that was set by the instantHandler
-			  }
+      if((socket != nullptr) &&
+         !socket->onInstant(this->rxFrame, &this->ackFrame.dataLen, this->ackFrame.data))
+      {
+        // Nothing to add - discard anything the handler may have written.
+        this->ackFrame.dataLen = Frame::ACK_OK;
       }
 
-      // The received frame is passed to the consumer queue by txAck(), once
-      // the ack has been sent - see txAck().
+      // A received 'T' frame is passed to the consumer queue by txAck(),
+      // once the ack has been sent - see txAck().
 
       // capture the exact point of transition - ackDelay() waits an
       // absolute ACK_DELAY_MS measured from here, not from whenever it
@@ -165,7 +156,10 @@ uint8_t Reader::txAck()
   // response - e.g. a SerlinkRelay relaying the frame, whose relay ack ('B')
   // would otherwise beat this ack if the far end acks within ACK_DELAY_MS.
   // rxFrame is unchanged since idle(): no frame is read in ACKDELAY / TXACK.
-  if(this->consumerQueue != nullptr)
+  //
+  // An 'S' frame stops here: it was for the SerLink layer, answered on the
+  // ack, and carries nothing for the socket's owner or its relay.
+  if((this->consumerQueue != nullptr) && (this->rxFrame.type == Frame::TYPE_TRANSMISSION))
   {
     this->rxFrame.copy(&this->rxFrameMsg.frame);
     this->rxFrameMsg.type = FrameMsg::TYPE_RX;
@@ -220,30 +214,3 @@ bool Reader::checkUartFrameRx()
   return false;
 }
 
-bool Reader::registerInstantCallback(char* protocol, readHandler handler)
-{
-  if(this->numInstantHandlers < (READER_CONFIG__MAX_NUM_INSTANT_HANDLERS - 1))
-  {
-    strncpy(this->handlerRegistrations[this->numInstantHandlers].protocol, protocol, Frame::LEN_PROTOCOL);
-    this->handlerRegistrations[this->numInstantHandlers].handler = handler;
-    this->numInstantHandlers++;
-    return true;
-  }
-  else
-  {
-    // No more registrations are available
-    return false;
-  }
-}
-
-readHandler Reader::getInstantHandler(char* protocol)
-{
-  for(uint8_t i=0; i<READER_CONFIG__MAX_NUM_INSTANT_HANDLERS; i++)
-  {
-    if(0 == strncmp(this->handlerRegistrations[i].protocol, protocol, Frame::LEN_PROTOCOL))
-    {
-      return this->handlerRegistrations[i].handler;
-    }
-  }
-  return nullptr;
-}
