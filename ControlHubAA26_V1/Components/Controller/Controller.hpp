@@ -60,6 +60,31 @@
  * controller keeps accumulating through that lag, and overshoots if the
  * gain is too high for it. Tune integralGain low first and raise it.
  *
+ * Unresponsive tachometer
+ * -----------------------
+ * A tachometer that has failed or come unplugged reads zero, and to the
+ * law that looks like a motor far below its demand: the output climbs
+ * to outputMaxPercent and stays there. outputMaxPercent bounds how hard
+ * the motor is driven meanwhile, but not for how long. So if the reading
+ * stays at zero for tachoUnresponsiveTimeout_S while run() is driving
+ * with a non-zero demand, run() stops the motor itself: it disables the
+ * controller, writes 0%, sets the direction idle and latches a fault
+ * (isTachoFault()).
+ *
+ * The timeout has to cover a genuine start as well as a dead sensor. The
+ * output ramps up from wherever the motor was (Bumpless start, below),
+ * which from rest is 0%, and the tachometer reads zero until the first
+ * revolution completes (Feedback lag, below) - so allow for the ramp to
+ * the motor's breakaway duty plus a revolution at low speed.
+ *
+ * Only a sustained zero counts. A reading rejected as implausible does
+ * not, and one non-zero reading restarts the count. Nor does a zero
+ * demand, where zero is the right answer, or a pass spent in hold().
+ *
+ * The fault stays set, and the controller disabled, until the next
+ * enable(); the first run() after that clears it and starts again. A
+ * sensor that is still dead trips it again one timeout later.
+ *
  * Direction
  * ---------
  * The tachometer reports speed without sign, so the controller cannot
@@ -143,6 +168,11 @@ class ControllerConfig
     // anything the motor can really do.
     uint16_t maxPlausibleRpm;
 
+    // Seconds the reading may stay at zero, while driving with a non-zero
+    // demand, before run() stops the motor and latches a fault. 0 turns
+    // the check off. See Unresponsive tachometer, above.
+    uint16_t tachoUnresponsiveTimeout_S;
+
     // How often the owning task calls run(). Unused by this class's own
     // law; there for subclasses that need real time units.
     uint16_t periodMs;
@@ -159,7 +189,8 @@ class Controller
     virtual ~Controller() = default;
 
     // Validates the config. Returns false, and the controller stays
-    // disabled, if it is unusable (a null callback, or min > max).
+    // disabled, if it is unusable (a null callback, min > max, or a
+    // tacho timeout with a zero periodMs).
     bool init();
 
     // One control pass. Call periodically, at config.periodMs, from the
@@ -179,6 +210,8 @@ class Controller
 
     // Any task. enable() hands the motor to the controller from the next
     // run(); disable() hands it back, and nothing more is written.
+    // enable() is also how a tacho fault is cleared - see Unresponsive
+    // tachometer, above.
     void enable();
     void disable();
     bool isEnabled() const;
@@ -200,6 +233,11 @@ class Controller
     // Diagnostics: readings rejected as implausible. Should stay at zero.
     uint16_t getRejectedCount() const;
 
+    // Any task. True once run() has stopped the motor because the
+    // tachometer read zero for tachoUnresponsiveTimeout_S; stays true
+    // until the first run() after the next enable().
+    bool isTachoFault() const;
+
   protected:
     // The control law. Given the error (required - measured; positive
     // means too slow), the measured speed and the present output, return
@@ -216,13 +254,17 @@ class Controller
     volatile uint16_t requiredRpm;
     volatile bool     enabled;
     volatile uint16_t rejectedCount;
+    volatile bool     tachoFault;   // written by the owning task only
 
     // Owning task only.
     bool  driving;   // false until the first run() after enable() / hold()
     bool  valid;     // init() passed
     volatile float output;  // unrounded; read by getOutput() from any task
+    uint32_t zeroRpmPasses;      // consecutive driving passes reading zero
+    uint32_t zeroRpmLimitPasses; // the timeout in passes; 0 = check off
 
     float clamp(float value) const;
+    void  stopForTachoFault();
 };
 
 #endif /* CONTROLLER_HPP_ */

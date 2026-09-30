@@ -51,9 +51,20 @@ error-prone; prefer the IDE's project properties.
 `Drivers/` tree. Hand edits in those files survive only inside `/* USER CODE BEGIN x */`
 … `/* USER CODE END x */` markers. Anything substantial belongs in the C++ layer instead.
 
-PB8 (motor `/STBY`) is deliberately not claimed in the `.ioc` — `TC78H611FNG_Standby`
-configures it at runtime. For the same reason nothing stops a future CubeMX edit handing
-PB8 to a peripheral; see the note in `Core/Src/main_tasks.cpp`.
+PB8 (motor `/STBY`) and PF4 (tachoB input, EXTI4) are deliberately not claimed in the
+`.ioc` — `TC78H611FNG_Standby` and `Tachometer::init()` configure them at runtime, and
+`EXTI4_IRQHandler` is hand-written in `stm32f4xx_it.c`. For the same reason nothing stops
+a future CubeMX edit handing either pin to a peripheral; see the notes in
+`Core/Src/main_tasks.cpp`.
+
+USER CODE blocks that matter and are easy to lose:
+
+- `stm32f4xx_hal_msp.c`, `TIM8_MspInit 1` — re-applies PA6 (TIM8_BKIN) with a pull-down.
+  CubeMX sets it floating, and the TIM8 break is armed active-high, so a floating PA6
+  would latch the motor PWM off. The block runs again on every `HAL_TIM_PWM_Init()`,
+  including `PWM::init()`'s own.
+- `freertos.c`, `USER CODE 4` — must stay *without* a `vApplicationStackOverflowHook`
+  stub. The real hook is in `main_tasks.cpp`; a stub here is a duplicate-symbol link error.
 
 ## Architecture
 
@@ -99,8 +110,13 @@ Layers, bottom to top (`Frame` ↔ `Reader`/`Writer` ↔ `Transport` ↔ `Socket
   acquired `Socket` matches their 5-character protocol, and forwards outgoing frames to
   the `Writer`. Its dispatch queue is created by the caller and handed in via `init()`.
 - **`Socket`** — `transport.acquireSocket("PROTO", receiveCallback, instantHandler)`.
-  **`SERLINK_CONFIG__MAX_SOCKETS` is 5** and a sixth acquire returns a silent `nullptr`;
-  transport0 is currently full (RAD00, LED01, MOTOR, DBG00, MQTT0).
+  **`SERLINK_CONFIG__MAX_SOCKETS` is 10** (`SerLink_config.hpp`, per transport) and an
+  acquire past the limit returns a silent `nullptr`, so every socket pointer is checked
+  before use. transport0 holds eight (RAD00, LED01, MOTOR, CTRL0, ADC00, TACHO, and DBG00 /
+  MQTT0 acquired later from their own tasks); transport2 holds DBG00, CTRL0 and LIFT0.
+  A socket belongs to one transport, but a handler does not — the same handler functions
+  can back sockets on several transports (CTRL0 on uart2 and MQTT drive the same
+  controller; last command wins).
 
 The two handler kinds matter and are easy to confuse:
 
@@ -109,15 +125,25 @@ The two handler kinds matter and are easy to confuse:
 - **instant handler** runs in the *Reader* task, before the ack is sent, and its output
   rides back inside the ack frame. Use for reads/queries.
 
-### Two SerLink instances, and the relay
+### Three SerLink instances, and the relay
 
-The same stack is instantiated twice:
+The same stack is instantiated three times:
 
 - **SerLink0** over USART2 (`transport0`, `writer0`/`reader0`, link = `HAL/uart2/`).
 - **SerLink1** over the nRF24L01 radio (`transport1`, `writer1`/`reader1`, link =
   `Components/Radio/`), selected by the `RADIO_SERLINK` / `RADIO_TEST_TX` compile-time
   switches at the top of `main_tasks.cpp`. The nRF24L01 driver is not thread-safe, so
   exactly one owner is selected at build time — SerLink1, or one of the raw test tasks.
+- **SerLink2** over MQTT (`transport2`, `writer2`/`reader2`, link =
+  `Components/Adapters/Mqtt/SerLinkMqttAdapter` wrapping `mqtt2Client`). Frames travel as
+  the MQTT payload, exactly as they appear on uart2: PC → board on
+  `hub/aa26/serlink/down`, board → PC on `hub/aa26/serlink/up`. The topics must be a
+  pair, since the broker echoes a publisher's own messages back to it. Acks go out via
+  `Reader::setAckWriteFunc()`. The stack is idle until `mqtt2` connects; until then
+  `write()` refuses, and outgoing frames are dropped rather than queued.
+
+`Components/Adapters/` also holds a `LinkInterface` and uart/radio adapters for it, but
+nothing uses them yet — SerLink0/1 still take their link queues directly.
 
 `SerlinkRelay` bridges a socket on one transport to a socket on the other, in both
 directions, keeping the roll code so a source can match the returned relay ack (`'B'`)
@@ -135,7 +161,8 @@ not corruption.
 ### Hardware drivers
 
 `Components/` holds hardware abstractions used by the application (`Led`, `Button`, `PWM`,
-`Motor/TC78H611FNG`, `Motor/L293D`, `nRF24L01`, `Radio`, `Mqtt`). `HAL/` holds thin
+`Motor/TC78H611FNG`, `Motor/L293D`, `Adc`, `Tachometer`, `Controller`, `Lift`,
+`nRF24L01`, `Radio`, `Mqtt`, `Adapters`). `HAL/` holds thin
 per-peripheral C wrappers over CubeMX's handles (`uart2`, `spi5`) that CubeMX does not
 generate.
 
@@ -150,12 +177,60 @@ Two shared-state gotchas:
 `TC78H611FNG` drives *one* H-bridge channel with **both** IN pins as PWM channels (not one
 PWM + one GPIO), so a direction change is two `setPercent()` calls with no pin-mode glitch.
 `/STBY` is device-wide and lives in a separate `TC78H611FNG_Standby` shared by both channels.
-Bring-up order matters: park the IN pins low, *then* `enable()` standby.
+Bring-up order matters: park the IN pins low, *then* `enable()` standby. TIM8's break
+input (PA6) is armed, so a high on PA6 latches motorB's outputs off; nothing is wired
+to it yet (see the CubeMX section).
+
+### Motor control chain (motorB)
+
+`tachoB` → `controllerB` → `motorB`, with `liftB` on top; all run from `controlBTask`
+every `CONTROLB_PERIOD_MS` (50 ms).
+
+- **`Tachometer`** — Hall sensor on PF4 (EXTI4, both edges, 2 edges/rev), timestamped
+  from free-running 32-bit TIM5. The ISR only queues timestamps; `update()` turns them
+  into RPM and rejects glitches. Distance is counted in *edges* (`getEdges()`), not revs.
+- **`Controller`** — integral speed controller. It sees the motor only through the
+  function pointers in `ControllerConfig` (captureless lambdas in `main_tasks.cpp`), and
+  has its own `ControllerDirection` type, translated explicitly to the driver's. While
+  enabled it owns motorB's duty cycle. A MOTOR `S` (set speed) or CTRL0 `R` command
+  enables it; a MOTOR `P` (set percent) command disables it. Two safety limits cover a
+  dead or unplugged tacho, which reads zero and would wind the output to its maximum:
+  `outputMaxPercent` (50% for motorB) caps the duty, and `tachoUnresponsiveTimeout_S`
+  (10 s) disables the controller, writes 0%, sets idle and latches `isTachoFault()`
+  (CTRL0 `BGF`). A Lift move in progress ends short. The next enable clears the fault.
+- **`Lift`** — move-by-distance (in tacho edges) at `LIFTB_SPEED_RPM` on top of the
+  controller. `liftB.run()` also runs the controller, so `controlBTask` calls only
+  `liftB.run()`. LIFT0 commands arrive in the serLink2 task and reach `controlBTask`
+  via `liftCmdQueue`, never by direct calls. CTRL0 still works while the lift is idle,
+  but a CTRL0 command during a move can stall it or cut it short.
+- **`Adc`** — ADC1 scans PA0/PA3/PA4/PA5 by DMA into a circular buffer, triggered by TIM2,
+  and averages each half buffer. PA3 is the motorB current sense, which is RC-filtered on
+  the board — fine for monitoring, too slow for overcurrent protection.
+
+`controlBTask` publishes TACHO (`'U'`, no ack) every `TACHO_PUBLISH_PERIOD_MS`, which
+must be a whole multiple of `CONTROLB_PERIOD_MS` (enforced by a `static_assert`), and a
+CTRL0 status frame on both uart2 and MQTT.
+
+### Task stacks
+
+`configCHECK_FOR_STACK_OVERFLOW` is 2. `vApplicationStackOverflowHook()` in
+`main_tasks.cpp` lights LD3 (red) and prints `STACK OVERFLOW: <task>` straight to the
+USART2 registers, so no debugger is needed. Most task stacks are 256 words. Any task that
+calls into the MQTT client (mqttTask, mqttRxTask, mqtt2Task, writer2Task, reader2Task)
+gets `MQTT_TASK_STACK_SIZE` (2 KB), because an MQTT publish runs the whole lwIP send
+path on the *caller's* stack, and 1 KB overflowed within seconds. Before trimming any
+stack, check `DBG00T349002SL` (the task with the least stack free) or `DBG00T349003Snn`
+(task nn by index).
 
 ### Networking
 
 Static IP **192.168.0.200** (`LWIP/App/lwip.c`, no DHCP). `MqttPubSub` wraps lwIP's MQTT
-client; the broker address is `MQTT_BROKER_IP` in `main_tasks.cpp`. Tasks that touch lwIP
+client; the broker address is `MQTT_BROKER_IP` in `main_tasks.cpp`. There are two
+connections to the broker: `mqtt` (test pub/sub) and `mqtt2Client` (SerLink2 only).
+They must stay separate instances with **different client IDs**. `MqttPubSub` has one
+unfiltered rxQueue, so sharing a client would let two readers steal each other's
+messages, and a duplicate client ID makes the broker kick the two connections off in a
+loop. Tasks that touch lwIP
 must wait for `netif_is_up(&gnetif) && netif_is_link_up(&gnetif)` — `initTasks()` runs
 before `MX_LWIP_Init()`, so the netif coming up is the readiness signal. An lwIP HTTP
 server runs from `Core/Src/httpd_app.c`.
@@ -164,8 +239,10 @@ server runs from `Core/Src/httpd_app.c`.
 
 USART2 on **PD5 (TX) / PD6 (RX)** via an FTDI cable on CN9 — *not* the ST-LINK virtual COM
 port (that is USART3 on PD8/PD9). 115200 baud, CR+LF line ends. Typing a frame into a
-terminal is the primary way to drive the board; worked examples for the DBG00, LED01 and
-MOTOR sockets are at the top of `Core/Src/main_tasks.cpp`.
+terminal is the primary way to drive the board; worked examples for the DBG00, LED01,
+MOTOR, CTRL0, LIFT0, ADC00 and TACHO sockets are at the top of `Core/Src/main_tasks.cpp`.
+LIFT0 exists only on SerLink2, so it has to go over MQTT (`mosquitto_pub` to
+`hub/aa26/serlink/down`), not the serial console.
 
 ## Conventions
 
@@ -178,7 +255,7 @@ MOTOR sockets are at the top of `Core/Src/main_tasks.cpp`.
   header of each such class — read it before calling a driver from a new task.
 - Tuning constants are `#define`s grouped with the object they configure at the top of
   `main_tasks.cpp` (radio channel/payload, MQTT broker/topics/period, motor PWM frequency
-  and start percent). Protocol-wide limits live in the `*_config.hpp` files under
+  and start percent, controller gain/limits, lift speed, tacho publish period). Protocol-wide limits live in the `*_config.hpp` files under
   `Middlewares/SerLink/`.
 - Header comments in this codebase carry the design rationale — the *why*, the datasheet
   reference, the threading contract. Match that when adding code.

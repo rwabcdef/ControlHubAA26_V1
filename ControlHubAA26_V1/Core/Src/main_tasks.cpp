@@ -16,6 +16,7 @@
  DBG00T349002R2      # will produce ack with data "OK" (from: debugSockInstantHandler())
  DBG00T349003S00     # task 00 stack: name and lowest free bytes, e.g. "writer0Task:0412"
  DBG00T349002SL      # the task with the least stack free, same format
+ DBG00T349001M       # MQTT link (SerLink2): C/D connected, rx, tx, tx dropped, other topic
 
  # led socket - relayed to the radio, and ultimatelty to the remote hub (arduino uno r4)
 LED01U492002A1
@@ -45,6 +46,7 @@ CTRL0T523003BDF     # controllerB: direction forward
 CTRL0T523003BDR     # controllerB: direction reverse (F forward, D disabled)
 CTRL0T529003BGR     # read the required RPM back -> CTRL0A5290040120
 CTRL0T529003BGD     # read the direction back    -> CTRL0A529001R
+CTRL0T529003BGF     # tacho fault (motor stopped, tacho read 0 too long) -> CTRL0A5290011
 CTRL0U001008030.0350  # sent by the board: duty 30%, 350 RPM (no ack)
 
 # Lift socket - liftB, over MQTT only (SerLink2: publish to hub/aa26/serlink/down).
@@ -525,10 +527,25 @@ SerLink::Socket* tachoSocket = nullptr;
 // CONTROLB_MAX_PLAUSIBLE_RPM only has to catch sensor faults, so it sits
 // well above anything this gearbox reaches - lower it if a real top
 // speed is known.
+//
+// CONTROLB_OUTPUT_MAX_PERCENT caps the duty cycle the controller can
+// ever write. With a dead or unplugged tacho the reading is zero and the
+// law climbs straight to this limit, so it is also how hard the motor is
+// driven until the timeout below stops it. 50% covers LIFTB_SPEED_RPM;
+// raise it if a demand ever needs more.
+//
+// CONTROLB_TACHO_TIMEOUT_S: how long the tacho may read zero, with a
+// non-zero demand, before controllerB stops the motor and latches a
+// fault (CTRL0T529003BGF reads it). It has to outlast a genuine start
+// from rest: the output ramps from 0% at CONTROLB_INTEGRAL_GAIN *
+// demand per pass - 0.3% per pass, 6%/s, at 150 RPM - so reaching the
+// motor's breakaway duty takes a few seconds, and tachoB then reads zero
+// until the first revolution completes. 0 turns the check off.
 #define CONTROLB_INTEGRAL_GAIN      0.002f
 #define CONTROLB_OUTPUT_MIN_PERCENT 0U
-#define CONTROLB_OUTPUT_MAX_PERCENT 100U
+#define CONTROLB_OUTPUT_MAX_PERCENT 50U
 #define CONTROLB_MAX_PLAUSIBLE_RPM  3000U
+#define CONTROLB_TACHO_TIMEOUT_S    10U
 
 // Controller has its own direction type so it does not depend on the
 // motor driver; these translate for the TC78H611FNG. Written out for
@@ -569,6 +586,7 @@ static const ControllerConfig controllerBConfig =
   CONTROLB_OUTPUT_MIN_PERCENT,
   CONTROLB_OUTPUT_MAX_PERCENT,
   CONTROLB_MAX_PLAUSIBLE_RPM,
+  CONTROLB_TACHO_TIMEOUT_S,
   CONTROLB_PERIOD_MS
 };
 
@@ -1411,6 +1429,10 @@ bool motorSockInstantHandler(SerLink::Frame &rxFrame, uint16_t* dataLen, char* d
 //
 //     CTRL0T529003BGR  ->  CTRL0A5290040120   required speed, 4 digits
 //     CTRL0T529003BGD  ->  CTRL0A529001F      direction, one of F/R/D
+//     CTRL0T529003BGF  ->  CTRL0A5290011      tacho fault, 1 or 0 - 1 once
+//                          the controller has stopped the motor because
+//                          tachoB read zero for CONTROLB_TACHO_TIMEOUT_S.
+//                          Cleared by the next speed set (BR<dddd>).
 //
 //   Status. Sent unsolicited by controlBTask every
 //   TACHO_PUBLISH_PERIOD_MS, as 'U' (no ack expected):
@@ -1438,7 +1460,7 @@ bool motorSockInstantHandler(SerLink::Frame &rxFrame, uint16_t* dataLen, char* d
 #define CONTROL_CMD_MIN_LEN        2U   // <ctl><cmd>
 #define CONTROL_CMD_SET_RPM_LEN    6U   // <ctl>R<dddd>
 #define CONTROL_CMD_DIRECTION_LEN  3U   // <ctl>D<F|R|D>
-#define CONTROL_CMD_GET_LEN        3U   // <ctl>G<R|D>
+#define CONTROL_CMD_GET_LEN        3U   // <ctl>G<R|D|F>
 #define CONTROL_RPM_FIELD_WIDTH    4U
 #define CONTROL_PWM_FIELD_WIDTH    3U   // status frame duty cycle, 0..100
 
@@ -1540,6 +1562,11 @@ bool controlSockInstantHandler(SerLink::Frame &rxFrame, uint16_t* dataLen, char*
 
     case 'D':   // direction, one of F/R/D - same letters the set takes
       data[0] = controlDirectionToChar(controller->getDirection());
+      *dataLen = 1U;
+      return true;
+
+    case 'F':   // tacho fault, 1 or 0 - see Unresponsive tachometer in Controller.hpp
+      data[0] = controller->isTachoFault() ? '1' : '0';
       *dataLen = 1U;
       return true;
 
@@ -2337,6 +2364,12 @@ extern "C" void vApplicationStackOverflowHook(TaskHandle_t xTask, char* pcTaskNa
 //   DBG00T349003S99  ->  DBG00A349003END           index past the last task
 //   DBG00T349002SL   ->  DBG00A349015mqttRxTask:0096   the task with the
 //                                                  least free, same format
+//   DBG00T349001M    ->  DBG00A349021C.0012.0340.0000.0000
+//                        SerLink2's MQTT link (mqtt2): C connected / D not,
+//                        then frames received, frames sent, sends dropped,
+//                        and messages on a topic other than the down one.
+//                        4 digits each, clamped at 9999. Ask over uart2 -
+//                        it is the way to see why MQTT is silent.
 //
 // Step S00, S01, ... until END to list every task, the kernel's own
 // (IDLE, Tmr Svc, tcpip_thread, ...) included. Tasks are numbered in
@@ -2484,6 +2517,29 @@ bool debugSockInstantHandler(SerLink::Frame &rxFrame, uint16_t* dataLen, char* d
     case 'S':
       *dataLen = stackQuery(&rxFrame.data[1], (uint16_t)(rxFrame.dataLen - 1), data);
       return true;
+
+    case 'M':   // mqtt2 link state - see the DBG00 notes above
+    {
+      /* Getters only; each counter is one aligned word, so reading them
+         from reader0Task alongside mqtt2Task is safe - at worst one is a
+         message behind another. */
+      const uint32_t counts[] =
+      {
+        mqtt2.getRxFrames(), mqtt2.getTxFrames(),
+        mqtt2.getTxDropped(), mqtt2.getOtherTopic()
+      };
+
+      data[0] = mqtt2.isConnected() ? 'C' : 'D';
+      uint16_t len = 1U;
+      for(uint32_t count : counts)
+      {
+        data[len++] = '.';
+        writeUintField((count > 9999U) ? 9999U : count, 4U, &data[len]);
+        len += 4U;
+      }
+      *dataLen = len;
+      return true;
+    }
 
     default:
       return false; // not handled

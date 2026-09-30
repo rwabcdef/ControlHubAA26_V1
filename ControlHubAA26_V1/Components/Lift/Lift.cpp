@@ -98,6 +98,17 @@ void Lift::run()
   {
     controller->run();
   }
+
+  /* The controller has stopped the motor itself: the tacho read zero for
+     too long (Unresponsive tachometer, Controller.hpp). No more edges
+     will come, so the distance check above would never end the move -
+     end it here, short. After the controller's pass rather than before,
+     so it shows as idle in the same pass the motor stopped. The motor is
+     already disabled and idle; there is nothing left for stop() to do. */
+  if(valid && (state == status::moving) && controller->isTachoFault())
+  {
+    state = status::idle;
+  }
 }
 
 Lift::status Lift::getStatus() const

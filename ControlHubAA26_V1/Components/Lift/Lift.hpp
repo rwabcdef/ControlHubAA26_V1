@@ -46,6 +46,11 @@
  * far the lift coasts. getTravelled() keeps counting after a move ends,
  * until the next start(), so that overrun can be read back.
  *
+ * If the controller stops the motor for a tacho fault (Unresponsive
+ * tachometer, Controller.hpp), run() ends the move there and then, short
+ * of its target: travelled < target in the status is how it shows, and
+ * controller->isTachoFault() says why.
+ *
  * Threading
  * ---------
  * start(), stop() and run() belong to one task - the one that runs the
@@ -74,7 +79,7 @@ class Lift
 
     enum class status : uint8_t
     {
-      idle,     // stopped: never started, arrived, or stop() called
+      idle,     // stopped: never started, arrived, stop() called, or tacho fault
       moving
     };
 
