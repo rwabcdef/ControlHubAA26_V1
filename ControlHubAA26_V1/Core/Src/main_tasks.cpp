@@ -85,11 +85,14 @@ CTRL0U001008030.0350  # duty 30%, measured 350 RPM
 CTRL0T516006BR0020  # speed for the moves that follow: 20 RPM
 LIFT0U645006BSF234  # start liftB forward for 234 edges (1..6 digits)
 LIFT0U645006BSR234  # start liftB reverse for 234 edges
+LIFT0U645006BG2000  # liftB down to the ground sensor (PB9), 2000 edges max
 LIFT0U645002BX      # stop liftB now (coasts)
 LIFT0T645002BT      # liftB status -> LIFT0A645014M000120.000234
-                    #   M moving / I idle, edges travelled, target
-# Sent by the board when a move ends (arrived, stopped, or tacho fault):
+                    #   M moving / I idle / G idle on the ground sensor,
+                    #   edges travelled, target
+# Sent by the board when a move ends (arrived, stopped, ground, or tacho fault):
 LIFT0U001015BI000234.000234   # liftB idle, 234 of 234 edges travelled
+LIFT0U001015BG000180.002000   # liftB ground move found the ground after 180
 LIFT0U001015BI000000.000234   # ended short - with CTRL0 BGF reading 1, the
                               # tacho timeout stopped it
 
@@ -660,8 +663,19 @@ Controller controllerB(controllerBConfig);
 // lift forward. Swap it if the lift is mounted the other way round.
 #define LIFTB_FORWARD_DIRECTION  ControllerDirection::forward
 
+// The ground sensor: a pressure plate microswitch on PB9, pulled up on
+// the board, so low while the lift is on the ground. PB9 is a plain
+// GPIO_Input in the .ioc (no pull - the board's pull-up does it), set
+// up by MX_GPIO_Init(). Only ground moves (LIFT0 BG) look at it - see
+// Ground level in Lift.hpp.
+#define LIFTB_GROUND_PORT        GPIOB
+#define LIFTB_GROUND_PIN         GPIO_PIN_9
+#define LIFTB_GROUND_ACTIVE      GPIO_PIN_RESET
+
 Lift liftB(&controllerB, LIFTB_FORWARD_DIRECTION,
-           []() -> uint32_t { return tachoB.getEdges(); });
+           []() -> uint32_t { return tachoB.getEdges(); },
+           []() -> bool { return HAL_GPIO_ReadPin(LIFTB_GROUND_PORT,
+                            LIFTB_GROUND_PIN) == LIFTB_GROUND_ACTIVE; });
 
 // A lift command, parsed by liftSockReceiveHandler() in serLink2Task and
 // carried to controlBTask, which owns liftB. One queue item per command,
@@ -669,12 +683,12 @@ Lift liftB(&controllerB, LIFTB_FORWARD_DIRECTION,
 // with the next command's the way separate shared variables could.
 struct LiftCmd
 {
-  enum op_t : uint8_t { start, stop };
+  enum op_t : uint8_t { start, ground, stop };
 
   Lift*           lift;
   op_t            op;
   Lift::direction dir;        // start only
-  uint32_t        distance;   // start only
+  uint32_t        distance;   // start, and ground's maximum
 };
 
 // Commands arriving within one CONTROLB_PERIOD_MS. A command sent with
@@ -1725,19 +1739,25 @@ bool controlSockInstantHandler(SerLink::Frame &rxFrame, uint16_t* dataLen, char*
 //
 //     LIFT0U645006BSF234   start forward, 234 edges (1..6 digits)
 //     LIFT0U645006BSR234   start reverse, 234 edges
+//     LIFT0U645006BG2000   down to the ground: reverse until the ground
+//                          sensor closes, or 2000 edges, whichever is
+//                          first (1..6 digits). Already on the ground,
+//                          it does not move, but still sends the done
+//                          message (travelled 0).
 //     LIFT0U645002BX       stop - the motor coasts
 //
-//   A start while the lift is moving is ignored - stop it first. So is a
-//   distance of zero, and so is any start while controllerB's required
-//   speed is zero (it boots at CONTROLB_BOOT_RPM): the speed is set through CTRL0
-//   (BR<dddd>), not here - see Speed in Lift.hpp.
+//   A start (S or G) while the lift is moving is ignored - stop it first.
+//   So is a distance of zero, and so is any start while controllerB's
+//   required speed is zero (it boots at CONTROLB_BOOT_RPM): the speed is
+//   set through CTRL0 (BR<dddd>), not here - see Speed in Lift.hpp.
 //
 //   Read. Handled by liftSockInstantHandler(), answered on the ack, so it
 //   must be sent as 'T':
 //
 //     LIFT0T645002BT  ->  LIFT0A645014M000120.000234
 //
-//   <M|I>        moving or idle
+//   <M|I|G>      moving, idle, or idle with the last move ended by the
+//                ground sensor (a G move that ran out of edges is I)
 //   <dddddd>     edges travelled since the last start - still counting
 //                after a move ends, so the coast overrun shows
 //   <dddddd>     that start's target
@@ -1745,7 +1765,8 @@ bool controlSockInstantHandler(SerLink::Frame &rxFrame, uint16_t* dataLen, char*
 //   Both clamped at 999999.
 //
 //   Done. Sent unsolicited by controlBTask on the pass a move ends -
-//   distance reached or stop command - with the lift's letter in front,
+//   distance reached, ground reached, stop command or tacho fault - with
+//   the lift's letter in front,
 //   since nothing asked:
 //
 //     LIFT0U<rrr>015BI000234.000234   liftB idle, 234 of 234 edges
@@ -1761,10 +1782,12 @@ bool controlSockInstantHandler(SerLink::Frame &rxFrame, uint16_t* dataLen, char*
 #define LIFT_CMD_START_MIN_LEN   4U   // <lift>S<F|R><d>
 #define LIFT_DISTANCE_MAX_DIGITS 6U
 #define LIFT_CMD_START_MAX_LEN   (3U + LIFT_DISTANCE_MAX_DIGITS)
+#define LIFT_CMD_GROUND_MIN_LEN  3U   // <lift>G<d>
+#define LIFT_CMD_GROUND_MAX_LEN  (2U + LIFT_DISTANCE_MAX_DIGITS)
 #define LIFT_CMD_STATUS_LEN      2U   // <lift>T
 #define LIFT_FIELD_WIDTH         LIFT_DISTANCE_MAX_DIGITS
 #define LIFT_FIELD_MAX           999999U
-#define LIFT_STATUS_LEN          (2U + (2U * LIFT_FIELD_WIDTH))   // <M|I><d6>.<d6>
+#define LIFT_STATUS_LEN          (2U + (2U * LIFT_FIELD_WIDTH))   // <M|I|G><d6>.<d6>
 
 // The done message's frame type. 'U' (false) matches the CTRL0 status
 // frame: fire and forget, and over MQTT - TCP underneath - it is lost
@@ -1774,7 +1797,7 @@ bool controlSockInstantHandler(SerLink::Frame &rxFrame, uint16_t* dataLen, char*
 // cycle and holds up the frames queued behind it.
 #define LIFT_DONE_ACK            false
 
-// <M|I><travelled>.<target> into dst, LIFT_STATUS_LEN chars, no NUL -
+// <M|I|G><travelled>.<target> into dst, LIFT_STATUS_LEN chars, no NUL -
 // the status read's answer and the done message share it. Getters only,
 // so safe from any task.
 static void writeLiftStatus(const Lift& lift, char* dst)
@@ -1786,7 +1809,9 @@ static void writeLiftStatus(const Lift& lift, char* dst)
   if(travelled > LIFT_FIELD_MAX) { travelled = LIFT_FIELD_MAX; }
   if(target > LIFT_FIELD_MAX)    { target = LIFT_FIELD_MAX; }
 
-  dst[0] = (lift.getStatus() == Lift::status::moving) ? 'M' : 'I';
+  if(lift.getStatus() == Lift::status::moving)           { dst[0] = 'M'; }
+  else if(lift.getEndReason() == Lift::endReason::ground) { dst[0] = 'G'; }
+  else                                                    { dst[0] = 'I'; }
   writeUintField(travelled, LIFT_FIELD_WIDTH, &dst[1]);
   dst[1U + LIFT_FIELD_WIDTH] = '.';
   writeUintField(target, LIFT_FIELD_WIDTH, &dst[2U + LIFT_FIELD_WIDTH]);
@@ -1839,6 +1864,22 @@ void liftSockReceiveHandler(const char* data, uint16_t dataLen)
       }
 
       cmd.op = LiftCmd::start;
+      break;
+    }
+
+    case 'G':   // <lift>G<d..d> - down to the ground, d..d edges at most
+    {
+      if((dataLen < LIFT_CMD_GROUND_MIN_LEN) || (dataLen > LIFT_CMD_GROUND_MAX_LEN))
+      {
+        return;
+      }
+
+      if(!readUintField(&data[2], (uint8_t)(dataLen - 2U), &cmd.distance))
+      {
+        return;
+      }
+
+      cmd.op = LiftCmd::ground;
       break;
     }
 
@@ -1932,11 +1973,22 @@ void startControlBTask(void *argument)
        measures from this pass's edge count; drained completely, so a
        start and a stop sent together are both seen, in order. */
     LiftCmd cmd;
+    bool liftBGroundAlready = false;
     while(xQueueReceive(liftCmdQueue, &cmd, 0U) == pdTRUE)
     {
       if(cmd.op == LiftCmd::start)
       {
         (void)cmd.lift->start(cmd.dir, cmd.distance);   // refused if moving
+      }
+      else if(cmd.op == LiftCmd::ground)
+      {
+        /* Accepted but still idle: already on the ground, so it never
+           moved. The PC still waits for a done message - send one below. */
+        if(cmd.lift->toGroundLevel(cmd.distance) &&
+           (cmd.lift->getStatus() == Lift::status::idle))
+        {
+          liftBGroundAlready = true;
+        }
       }
       else
       {
@@ -1948,13 +2000,14 @@ void startControlBTask(void *argument)
        holds it while the direction is idle. See Lift::run(). */
     liftB.run();
 
-    /* A move has ended since the last pass - distance reached in run(),
-       or a stop command above. Tell the PC over the socket the start came
-       in on. Non-blocking: sendData() only queues the frame for writer2,
+    /* A move has ended since the last pass - distance or ground reached
+       in run(), or a stop command above - or a ground move found the
+       lift already there. Tell the PC over the socket the start came in
+       on. Non-blocking: sendData() only queues the frame for writer2,
        and it is dropped if mqtt2 is not connected. */
     Lift::status liftBStatus = liftB.getStatus();
-    if((liftBLastStatus == Lift::status::moving) &&
-       (liftBStatus == Lift::status::idle) &&
+    if((((liftBLastStatus == Lift::status::moving) &&
+         (liftBStatus == Lift::status::idle)) || liftBGroundAlready) &&
        (liftMqttSocket != nullptr))
     {
       liftDoneData[0] = 'B';

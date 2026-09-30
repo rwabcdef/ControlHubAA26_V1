@@ -1,18 +1,18 @@
 /*
  * Lift.cpp
  *
- * See Lift.hpp for how directions map, what the distance is, and the
- * threading contract.
+ * See Lift.hpp for how directions map, what the distance is, the ground
+ * sensor, and the threading contract.
  */
 
 #include "Lift.hpp"
 
 Lift::Lift(Controller* controller, ControllerDirection forwardDirection,
-           uint32_t (*getDistance)())
+           uint32_t (*getDistance)(), bool (*atGround)())
 : controller(controller), forwardDirection(forwardDirection),
-  getDistance(getDistance),
-  valid(false), started(false), startDistance(0U),
-  state(status::idle), travelled(0U), target(0U)
+  getDistance(getDistance), atGround(atGround),
+  valid(false), started(false), groundMove(false), startDistance(0U),
+  state(status::idle), travelled(0U), target(0U), ended(endReason::none)
 {
 }
 
@@ -27,6 +27,33 @@ bool Lift::init()
 
 bool Lift::start(direction d, uint32_t distance)
 {
+  return beginMove(d, distance, false);
+}
+
+bool Lift::toGroundLevel(uint32_t maxDistance)
+{
+  if(!valid || (atGround == nullptr) || (state == status::moving) ||
+     (maxDistance == 0U))
+  {
+    return false;
+  }
+
+  /* Checked before anything reaches the controller: setDirection() acts
+     at once (Direction, Controller.hpp), so starting and letting run()
+     notice would drive the lift into the ground for a moment. Recorded
+     as a move that ended at once, so the status says where the lift is. */
+  if(atGround())
+  {
+    mark(maxDistance);
+    ended = endReason::ground;
+    return true;
+  }
+
+  return beginMove(direction::reverse, maxDistance, true);
+}
+
+bool Lift::beginMove(direction d, uint32_t distance, bool toGround)
+{
   /* A zero demand would enable a controller that holds the motor still,
      leaving a move that can never finish - see Speed in Lift.hpp. Only
      read here: the speed is the controller's, set by whoever set it. */
@@ -36,10 +63,9 @@ bool Lift::start(direction d, uint32_t distance)
     return false;
   }
 
-  startDistance = getDistance();
-  started = true;
-  travelled = 0U;
-  target = distance;
+  mark(distance);
+  groundMove = toGround;
+  ended = endReason::none;
 
   /* Direction, then enable, so the controller's first pass already has
      everything it needs - the speed it already has. It seeds its output
@@ -52,7 +78,20 @@ bool Lift::start(direction d, uint32_t distance)
   return true;
 }
 
+void Lift::mark(uint32_t distance)
+{
+  startDistance = getDistance();
+  started = true;
+  travelled = 0U;
+  target = distance;
+}
+
 void Lift::stop()
+{
+  end(endReason::stopped);
+}
+
+void Lift::end(endReason why)
 {
   if(!valid)
   {
@@ -65,6 +104,14 @@ void Lift::stop()
   controller->disable();
   controller->setDirection(ControllerDirection::idle);
 
+  /* Only a move in progress has a reason to record - a stop() while idle
+     leaves the last move's standing. */
+  if(state == status::moving)
+  {
+    ended = why;
+  }
+
+  groundMove = false;
   state = status::idle;
 }
 
@@ -76,9 +123,15 @@ void Lift::run()
        after the move ends too, so the coast overrun shows. */
     travelled = getDistance() - startDistance;
 
-    if((state == status::moving) && (travelled >= target))
+    /* The ground first: on a pass where both are true the lift is on the
+       ground, and that is the more useful thing to report. */
+    if((state == status::moving) && groundMove && atGround())
     {
-      stop();
+      end(endReason::ground);
+    }
+    else if((state == status::moving) && (travelled >= target))
+    {
+      end(endReason::arrived);
     }
   }
 
@@ -109,6 +162,8 @@ void Lift::run()
      already disabled and idle; there is nothing left for stop() to do. */
   if(valid && (state == status::moving) && controller->isTachoFault())
   {
+    ended = endReason::tachoFault;
+    groundMove = false;
     state = status::idle;
   }
 }
@@ -126,6 +181,11 @@ uint32_t Lift::getTravelled() const
 uint32_t Lift::getTarget() const
 {
   return target;
+}
+
+Lift::endReason Lift::getEndReason() const
+{
+  return ended;
 }
 
 ControllerDirection Lift::toControllerDirection(direction d) const

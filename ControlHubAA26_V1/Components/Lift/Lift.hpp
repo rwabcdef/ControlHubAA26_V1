@@ -58,11 +58,38 @@
  * of its target: travelled < target in the status is how it shows, and
  * controller->isTachoFault() says why.
  *
+ * Ground level
+ * ------------
+ * toGroundLevel(maxDistance) is a reverse move that also ends when the
+ * ground sensor reads active - whichever comes first, the sensor or
+ * maxDistance. maxDistance is the backstop for a sensor that never
+ * closes (unplugged, or the lift jammed short of it), so make it a bit
+ * more than the full travel.
+ *
+ * The sensor is atGround, a plain function pointer like getDistance,
+ * returning true while the lift is on the ground. Lift knows nothing of
+ * the pin behind it. It is sampled once per run() pass, before the
+ * distance check, and a single active sample ends the move - no
+ * debounce, because a bounce on closing still means the ground was
+ * reached, and stopping early on a noise spike is the safe way to be
+ * wrong. As with a distance stop the motor coasts, so it runs on past
+ * the switch by the coast.
+ *
+ * Only ground moves watch the sensor; start(reverse, ...) drives past it.
+ * Already on the ground, toGroundLevel() does not move at all: it
+ * records a move that ended there at once (travelled 0, getEndReason()
+ * ground) and returns true, without the direction or enable ever
+ * reaching the controller.
+ *
+ * getEndReason() says why the last move ended, so a ground move that
+ * ran out of distance can be told from one that found the ground.
+ *
  * Threading
  * ---------
- * start(), stop() and run() belong to one task - the one that runs the
- * controller, and which must also be the one calling getDistance()'s
- * source's update() (Tachometer::update()), before run() each pass.
+ * start(), toGroundLevel(), stop() and run() belong to one task - the
+ * one that runs the controller, and which must also be the one calling
+ * getDistance()'s source's update() (Tachometer::update()), before run()
+ * each pass. atGround is only called from those, so from that task.
  *
  * The getters may be called from any task: each reads one aligned
  * scalar, stored atomically on this core. Read together they can be
@@ -90,15 +117,26 @@ class Lift
       moving
     };
 
+    // Why the last move ended. none until one has.
+    enum class endReason : uint8_t
+    {
+      none,
+      arrived,      // distance reached
+      ground,       // ground sensor active (toGroundLevel() only)
+      stopped,      // stop() called
+      tachoFault    // the controller stopped the motor
+    };
+
     // Only stores the arguments: a file scope Lift is constructed before
     // main(), when neither the HAL nor the RTOS exists.
     //
     // forwardDirection is the controller direction that moves the lift
-    // forward - forward or reverse, never idle. getDistance is a plain
-    // function pointer, as in ControllerConfig, so a captureless lambda
-    // will do.
+    // forward - forward or reverse, never idle. getDistance and atGround
+    // are plain function pointers, as in ControllerConfig, so a
+    // captureless lambda will do. atGround may be null, and then
+    // toGroundLevel() is refused.
     Lift(Controller* controller, ControllerDirection forwardDirection,
-         uint32_t (*getDistance)());
+         uint32_t (*getDistance)(), bool (*atGround)() = nullptr);
     virtual ~Lift() = default;
 
     // Validates the arguments. Returns false, and the lift stays idle
@@ -113,24 +151,33 @@ class Lift
     // Speed, above), or init() did not pass.
     bool start(direction d, uint32_t distance);
 
+    // Starts a reverse move that ends at the ground sensor or after
+    // maxDistance, whichever is first - see Ground level, above. Refused
+    // as start() is, and also if there is no atGround. Returns true
+    // without moving if already on the ground.
+    bool toGroundLevel(uint32_t maxDistance);
+
     // Ends the move: disables the controller and idles the motor, which
     // coasts. Harmless when already idle.
     void stop();
 
-    // One pass: ends the move if its distance is up, then runs the
-    // controller. Call at the controller's periodMs, after the distance
-    // source has been updated for this pass.
+    // One pass: ends the move if it is on the ground (ground moves only)
+    // or its distance is up, then runs the controller. Call at the
+    // controller's periodMs, after the distance source has been updated
+    // for this pass.
     void run();
 
     // Any task.
-    status   getStatus() const;
-    uint32_t getTravelled() const;   // since the last start()
-    uint32_t getTarget() const;      // the last start()'s distance
+    status    getStatus() const;
+    uint32_t  getTravelled() const;   // since the last start()
+    uint32_t  getTarget() const;      // the last start()'s distance
+    endReason getEndReason() const;   // of the last move; none while moving
 
   protected:
     Controller*         controller;
     ControllerDirection forwardDirection;
     uint32_t          (*getDistance)();
+    bool              (*atGround)();
 
     // The controller direction that moves the lift in d.
     ControllerDirection toControllerDirection(direction d) const;
@@ -138,12 +185,23 @@ class Lift
   private:
     bool valid;                // init() passed
     bool started;              // a start() has happened, so startDistance means something
+    bool groundMove;           // the move in progress watches atGround
     uint32_t startDistance;    // getDistance() at the last start()
 
+    // start() and toGroundLevel(), once their own checks have passed.
+    bool beginMove(direction d, uint32_t distance, bool toGround);
+
+    // Resets the travelled count and target for a new move.
+    void mark(uint32_t distance);
+
+    // stop()'s work, recording why.
+    void end(endReason why);
+
     // Published to the getters.
-    volatile status   state;
-    volatile uint32_t travelled;
-    volatile uint32_t target;
+    volatile status    state;
+    volatile uint32_t  travelled;
+    volatile uint32_t  target;
+    volatile endReason ended;
 };
 
 #endif /* LIFT_HPP_ */
