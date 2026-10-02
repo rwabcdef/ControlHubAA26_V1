@@ -108,14 +108,16 @@ ADC00T529002GA      # all four channels, raw
 TACHOU001011R0432.00017   # 432 RPM, 17 glitches rejected since boot.
                           # 'U', so the board expects no ack back
 
-# SD card socket - SDC00, over SerLink0 (uart2). Read only. See the SD
-# card block below initTasks()'s globals for the wiring, and SdCard.hpp.
+# SD card socket - SDC00, over SerLink0 (uart2). See the SD card block
+# below initTasks()'s globals for the wiring, and SdCard.hpp. One file
+# open at a time, for reading or for writing.
 #
-# Status <S><P|A><M|U><O|C>.<rr>: card Present/Absent, volume Mounted/
-# Unmounted, a file Open/Closed, and the last FatFs result (FRESULT, 2
-# digits: 00 ok, 03 not ready, 04 no such file, 13 not FAT). The board
-# sends it by itself when a card is inserted (once mounted, or not) or
-# removed, and the read answers it on the ack:
+# Status <S><P|A><M|U><R|W|C>.<rr>: card Present/Absent, volume Mounted/
+# Unmounted, a file open for Reading / Writing or Closed, and the last
+# FatFs result (FRESULT, 2 digits: 00 ok, 03 not ready, 04 no such file,
+# 07 denied - wrong open mode, or card full, 08 already exists, 13 not
+# FAT). The board sends it by itself when a card is inserted (once
+# mounted, or not) or removed, and the read answers it on the ack:
 SDC00T560001S              # -> SDC00A560007SPMC.00   present, mounted, no file
 SDC00U001007SPMC.00        # sent by the board: card inserted and mounted
 SDC00U002007SAUC.03        # sent by the board: card removed
@@ -141,6 +143,32 @@ SDC00T562007R0.0100        # read 100 bytes from offset 0 of the open file.
                            # binary survives and text stays readable. Past the
                            # end reads short (fewer bytes, rr still 00).
 SDC00T563001C              # close the file -> C<rr>, e.g. SDC00U007003C00
+                           # For a write file this is what flushes it -
+                           # always close before pulling the card.
+
+# Writing a text file - open, lines, close. W<mode><path>, mode:
+#   O overwrite - create it, or empty an existing one
+#   A append    - create it, or add to the end of an existing one
+#   N new       - create it; W08 (FR_EXIST) if it is already there
+# -> W<rr>.<size>: the size it was opened at (append: the existing size).
+SDC00T565009WALOG.TXT      # -> SDC00U008014W00.0000000034
+SDC00T566012LHello world   # write a line: the text, then SDCARD_LINE_END
+                           # (CR LF) -> L<rr>.<new file size>
+                           #    SDC00U009014L00.0000000047
+SDC00T566001L              # L alone writes a blank line
+SDC00T567010PPart one     # P<text>: text only, no line end - for a line
+SDC00T566011L, part two    # longer than one frame (63 characters), send P
+                           # pieces, then L with the last piece. -> P<rr>.<size>
+                           # Here the line is "Part one, part two".
+SDC00T563001C              # close -> C00
+#
+# Each L/P is synced to the card before it is answered (SDCARD_SYNC_EACH_WRITE),
+# so an answered line survives the card being pulled. The text is written
+# exactly as sent, no escapes - so mind the length field (L + text). Send
+# the next line once the last one is answered: with several in flight,
+# a command that finds sdCardTask's queue full is answered
+#   SDC00U...002QL             # Q + the command - dropped, send it again
+# R on a write file, or L/P on a read file, is refused with rr 07.
 
  */
 
@@ -864,21 +892,35 @@ SdCard sdCard(&hsd, &SDFatFS, SDPath,
 
 // An SDC00 command, parsed by sdSockReceiveHandler() in serLink0Task and
 // carried to sdCardTask, which owns sdCard - the same arrangement as
-// LiftCmd. The path travels in the item, so it cannot be overwritten by
-// the next command before it is used.
+// LiftCmd. The path or text travels in the item, so it cannot be
+// overwritten by the next command before it is used.
 struct SdCmd
 {
-  enum op_t : uint8_t { open, read, close };
+  enum op_t : uint8_t { open, openWrite, read, writeLine, writeText, close };
 
-  op_t     op;
-  uint32_t offset;                                // read
-  uint32_t len;                                   // read
-  char     path[SerLink::Frame::MAX_DATALEN];     // open, NUL terminated
+  op_t              op;
+  SdCard::WriteMode mode;                          // openWrite
+  uint32_t          offset;                        // read
+  uint32_t          len;                           // read: bytes; write*: text length
+  char              text[SerLink::Frame::MAX_DATALEN];  // open*: path, NUL
+                                                   // terminated; write*: the text
 };
 
-// One command at a time is what a terminal sends; 2 allows an open and
-// a read typed back to back. Full, a command is dropped - after its ack.
-#define SDCARD_CMD_QUEUE_LENGTH 2
+// Lines can arrive faster than sdCardTask writes them (each line is
+// synced - several card writes), so this is a few deep. Full, a command
+// is not lost silently: the receive handler answers Q<cmd> instead, and
+// the sender should resend it. Pacing a writer on each L/P reply never
+// needs more than one slot.
+#define SDCARD_CMD_QUEUE_LENGTH 4
+
+// What L<text> ends each line with. CR LF, as the serial console uses;
+// "\n" for Unix-style files.
+#define SDCARD_LINE_END       "\r\n"
+
+// Sync after every L/P write, so a line that has been answered is on the
+// card even if it is pulled out (or the power goes) before C. Costs a
+// FAT and a directory sector write per line; 0 leaves it all to C.
+#define SDCARD_SYNC_EACH_WRITE 1
 StaticQueue_t sdCmdStaticQueue;
 uint8_t sdCmdQueueStorageArea[SDCARD_CMD_QUEUE_LENGTH * sizeof(SdCmd)];
 QueueHandle_t sdCmdQueue;
@@ -2241,12 +2283,13 @@ void startControlBTask(void *argument)
 //
 // The status read is answered on the ack (sdSockInstantHandler, in
 // reader0Task) from SdCard's getters. Everything that touches the card -
-// open, read, close - is posted to sdCardTask instead, because FatFs
-// blocks on the SD DMA and only sdCardTask may call it (Threading in
-// SdCard.hpp). Those answer with 'U' frames of their own once done; a
-// malformed command is dropped silently after its ack, as elsewhere.
+// open, read, write, close - is posted to sdCardTask instead, because
+// FatFs blocks on the SD DMA and only sdCardTask may call it (Threading
+// in SdCard.hpp). Those answer with 'U' frames of their own once done; a
+// malformed command is dropped silently after its ack, as elsewhere, and
+// one that finds the queue full is answered Q<cmd>.
 
-#define SDCARD_STATUS_LEN       7U    // S<P|A><M|U><O|C>.<rr>
+#define SDCARD_STATUS_LEN       7U    // S<P|A><M|U><R|W|C>.<rr>
 #define SDCARD_RESULT_WIDTH     2U    // FRESULT, 0..19
 #define SDCARD_SIZE_WIDTH       10U   // a uint32_t file size
 #define SDCARD_OFFSET_MAX_WIDTH 9U    // so a typed offset cannot overflow
@@ -2269,14 +2312,16 @@ extern "C" uint8_t BSP_SD_IsDetected(void)
   return sdCard.isCardPresent() ? SD_PRESENT : SD_NOT_PRESENT;
 }
 
-// S<P|A><M|U><O|C>.<rr> - the status read and the board's own status
-// frames. Getters only, so it is safe from reader0Task.
+// S<P|A><M|U><R|W|C>.<rr> - the status read and the board's own status
+// frames: file open for Reading, for Writing, or Closed. Getters only, so
+// it is safe from reader0Task.
 static void writeSdStatus(char* dst)
 {
   dst[0] = 'S';
   dst[1] = sdCard.isCardPresent() ? 'P' : 'A';
   dst[2] = sdCard.isMounted()     ? 'M' : 'U';
-  dst[3] = sdCard.isFileOpen()    ? 'O' : 'C';
+  dst[3] = !sdCard.isFileOpen()   ? 'C' :
+           (sdCard.isFileWritable() ? 'W' : 'R');
   dst[4] = '.';
   writeUintField((uint32_t)sdCard.getLastResult(), SDCARD_RESULT_WIDTH, &dst[5]);
 }
@@ -2359,22 +2404,52 @@ static void sendSdData(const uint8_t* buffer, uint32_t len)
   }
 }
 
+// sdCardTask only. <letter><rr>.<file size, 10 digits> - the answer to
+// O, W, L and P.
+static void sendSdResultAndSize(char letter, FRESULT result)
+{
+  char reply[1U + SDCARD_RESULT_WIDTH + 1U + SDCARD_SIZE_WIDTH];
+  reply[0] = letter;
+  writeUintField((uint32_t)result, SDCARD_RESULT_WIDTH, &reply[1]);
+  reply[1U + SDCARD_RESULT_WIDTH] = '.';
+  writeUintField(sdCard.getFileSize(), SDCARD_SIZE_WIDTH,
+    &reply[2U + SDCARD_RESULT_WIDTH]);
+  sdSend(reply, (uint16_t)sizeof(reply));
+}
+
 // sdCardTask only - carries out one command and sends its answer.
 static void runSdCmd(const SdCmd& cmd)
 {
   switch(cmd.op)
   {
-    case SdCmd::open:   // -> O<rr>.<size>
-    {
-      FRESULT result = sdCard.open(cmd.path);
+    case SdCmd::open:       // -> O<rr>.<size>
+      sendSdResultAndSize('O', sdCard.open(cmd.text));
+      break;
 
-      char reply[1U + SDCARD_RESULT_WIDTH + 1U + SDCARD_SIZE_WIDTH];
-      reply[0] = 'O';
-      writeUintField((uint32_t)result, SDCARD_RESULT_WIDTH, &reply[1]);
-      reply[1U + SDCARD_RESULT_WIDTH] = '.';
-      writeUintField(sdCard.getFileSize(), SDCARD_SIZE_WIDTH,
-        &reply[2U + SDCARD_RESULT_WIDTH]);
-      sdSend(reply, (uint16_t)sizeof(reply));
+    case SdCmd::openWrite:  // -> W<rr>.<size>
+      sendSdResultAndSize('W', sdCard.openWrite(cmd.text, cmd.mode));
+      break;
+
+    case SdCmd::writeLine:  // -> L<rr>.<size>
+    case SdCmd::writeText:  // -> P<rr>.<size>
+    {
+      /* One f_write() for the text and its line end, so the sync below
+         never lands between the two. */
+      static const char lineEnd[] = SDCARD_LINE_END;
+      char buffer[SerLink::Frame::MAX_DATALEN + sizeof(lineEnd) - 1U];
+
+      uint32_t len = cmd.len;
+      memcpy(buffer, cmd.text, len);
+      if(cmd.op == SdCmd::writeLine)
+      {
+        memcpy(&buffer[len], lineEnd, sizeof(lineEnd) - 1U);
+        len += (uint32_t)(sizeof(lineEnd) - 1U);
+      }
+
+      uint32_t written = 0U;
+      FRESULT result = sdCard.write((const uint8_t*)buffer, len,
+        (SDCARD_SYNC_EACH_WRITE != 0), &written);
+      sendSdResultAndSize((cmd.op == SdCmd::writeLine) ? 'L' : 'P', result);
       break;
     }
 
@@ -2449,8 +2524,21 @@ void startSdCardTask(void *argument)
   }
 }
 
+// Copies a path into cmd.text, NUL terminated for FatFs. False if it is
+// empty or too long to terminate.
+static bool copySdPath(const char* src, uint16_t len, SdCmd* cmd)
+{
+  if((len == 0U) || (len >= sizeof(cmd->text)))
+  {
+    return false;
+  }
+  memcpy(cmd->text, src, len);
+  cmd->text[len] = '\0';
+  return true;
+}
+
 // The commands. Runs in serLink0Task - parses and posts, and never
-// blocks: with the queue full the command is dropped.
+// blocks: with the queue full the command is answered Q<cmd> and dropped.
 void sdSockReceiveHandler(const char* data, uint16_t dataLen)
 {
   if(dataLen < 1U)
@@ -2462,19 +2550,43 @@ void sdSockReceiveHandler(const char* data, uint16_t dataLen)
 
   switch(data[0])
   {
-    case 'O':   // O<path>
-    {
-      /* The path is the rest of the frame; FatFs takes it NUL terminated. */
-      uint16_t pathLen = (uint16_t)(dataLen - 1U);
-      if((pathLen == 0U) || (pathLen >= sizeof(cmd.path)))
+    case 'O':   // O<path> - open for reading
+      if(!copySdPath(&data[1], (uint16_t)(dataLen - 1U), &cmd))
       {
         return;
       }
-      memcpy(cmd.path, &data[1], pathLen);
-      cmd.path[pathLen] = '\0';
       cmd.op = SdCmd::open;
       break;
-    }
+
+    case 'W':   // W<O|A|N><path> - open for writing: overwrite/append/new
+      if(dataLen < 3U)
+      {
+        return;
+      }
+      switch(data[1])
+      {
+        case 'O': cmd.mode = SdCard::WriteMode::overwrite; break;
+        case 'A': cmd.mode = SdCard::WriteMode::append;    break;
+        case 'N': cmd.mode = SdCard::WriteMode::createNew; break;
+        default:  return;
+      }
+      if(!copySdPath(&data[2], (uint16_t)(dataLen - 2U), &cmd))
+      {
+        return;
+      }
+      cmd.op = SdCmd::openWrite;
+      break;
+
+    case 'L':   // L<text> - write text and a line end; L alone, a blank line
+    case 'P':   // P<text> - write text only, for lines longer than a frame
+      cmd.len = (uint32_t)(dataLen - 1U);
+      if((data[0] == 'P') && (cmd.len == 0U))
+      {
+        return;
+      }
+      memcpy(cmd.text, &data[1], cmd.len);   /* <= MAX_DATALEN - 1, fits */
+      cmd.op = (data[0] == 'L') ? SdCmd::writeLine : SdCmd::writeText;
+      break;
 
     case 'R':   // R<offset>.<len>
     {
@@ -2519,7 +2631,14 @@ void sdSockReceiveHandler(const char* data, uint16_t dataLen)
       return;
   }
 
-  (void)xQueueSend(sdCmdQueue, &cmd, 0U);
+  /* A write line lost here would leave a hole in the file with nothing
+     to show for it, so say so: Q and the command letter. sendData() is
+     non-blocking, so this is safe from serLink0Task. */
+  if((xQueueSend(sdCmdQueue, &cmd, 0U) != pdTRUE) && (sdSocket != nullptr))
+  {
+    char busy[2] = { 'Q', data[0] };
+    (void)sdSocket->sendData(busy, (uint16_t)sizeof(busy), false);
+  }
 }
 
 // E<hhhhhhhh>.<mmmmm> - the HAL's SD error code (hsd.ErrorCode, the

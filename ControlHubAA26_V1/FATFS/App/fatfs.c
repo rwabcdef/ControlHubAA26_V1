@@ -45,7 +45,12 @@ void MX_FATFS_Init(void)
 DWORD get_fattime(void)
 {
   /* USER CODE BEGIN get_fattime */
-  return 0;
+  /* No RTC, so a fixed stamp for every file FatFs creates or modifies.
+     0 (the generated value) is month 0 day 0, which is not a valid FAT
+     date; this is the FAT epoch, 1980-01-01 00:00:00:
+     bits 31-25 year-1980, 24-21 month, 20-16 day, 15-11 h, 10-5 min,
+     4-0 s/2. Replace with an RTC read if one is ever configured. */
+  return ((DWORD)(1980 - 1980) << 25) | ((DWORD)1 << 21) | ((DWORD)1 << 16);
   /* USER CODE END get_fattime */
 }
 

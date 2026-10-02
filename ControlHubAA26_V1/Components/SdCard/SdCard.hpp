@@ -1,15 +1,33 @@
 /*
  * SdCard.hpp
  *
- * An SD card on SDIO, through FatFs: card detect, mount, and reading an
- * existing file. Read only for now - nothing here writes.
+ * An SD card on SDIO, through FatFs: card detect, mount, and one file at
+ * a time, open either for reading or for writing.
  *
  *   poll(), each pass  --> card detect pin, debounced
  *                          inserted --> mount()     (f_mount, forced)
  *                          removed  --> close(), unmount()
  *   open(path)         --> f_open(FA_READ)          (mounts first if needed)
  *   read(offset, ...)  --> f_lseek + f_read on the open file
- *   close()            --> f_close
+ *   openWrite(path, m) --> f_open(FA_WRITE | ...)   overwrite / append / new
+ *   write(data, ...)   --> f_write, then f_sync if asked
+ *   close()            --> f_close                  (flushes a write file)
+ *
+ * Writing
+ * -------
+ * A file is open for reading or for writing, never both: read() on a
+ * write file, or write() on a read file, is FR_DENIED. Append mode puts
+ * every write at the end, and a read's seek would undo that.
+ *
+ * Until it is synced or closed, written data may only be in FatFs's
+ * sector buffer, and the size in the directory entry is the old one - so
+ * a card pulled out, or the power lost, takes it with it. write(..., sync)
+ * flushes it straight away, at the cost of extra card writes (the FAT
+ * and the directory sector, each time). Without a clock (get_fattime() in
+ * fatfs.c) every file is stamped 1980-01-01 00:00.
+ *
+ * A full volume shows as FR_DENIED from write(), with *bytesWritten
+ * saying how much did fit.
  *
  * The layers underneath
  * ---------------------
@@ -137,12 +155,32 @@ class SdCard
     FRESULT read(uint32_t offset, uint8_t* buffer, uint32_t len,
                  uint32_t* bytesRead);
 
-    // Owner task. FR_OK, and harmless, if no file is open.
+    enum class WriteMode : uint8_t
+    {
+      overwrite,   // create, or empty an existing file      (FA_CREATE_ALWAYS)
+      append,      // create, or add to the end of one        (FA_OPEN_APPEND)
+      createNew    // create; FR_EXIST (8) if it is there     (FA_CREATE_NEW)
+    };
+
+    // Owner task. Opens a file for writing, closing any file already
+    // open, and mounting first if needed, as open() does.
+    FRESULT openWrite(const char* path, WriteMode mode);
+
+    // Owner task. Writes len bytes at the current position (the end, in
+    // append mode) and sets *bytesWritten. sync: flush to the card before
+    // returning - see Writing, above. FR_INVALID_OBJECT if no file is
+    // open, FR_DENIED if it is open for reading or the volume is full.
+    FRESULT write(const uint8_t* data, uint32_t len, bool sync,
+                  uint32_t* bytesWritten);
+
+    // Owner task. FR_OK, and harmless, if no file is open. For a write
+    // file, any unsynced data reaches the card here.
     FRESULT close();
 
     // Getters - any task, see Threading.
     bool isMounted() const;
     bool isFileOpen() const;
+    bool isFileWritable() const;    // open, and for writing
     uint32_t getFileSize() const;   // of the open file; 0 if none
     FRESULT getLastResult() const;
 
@@ -153,6 +191,9 @@ class SdCard
 
   private:
     FRESULT setResult(FRESULT result);
+
+    // open() and openWrite(): close, mount if needed, f_open with flags.
+    FRESULT openFile(const char* path, BYTE flags, bool writable);
 
     // HAL_SD_DeInit(), if hsd has been initialised: SDIO powered down and
     // reset, pins back to analog, DMA and interrupt off. Before every
@@ -173,6 +214,7 @@ class SdCard
 
     volatile bool    mounted;
     volatile bool    fileOpen;
+    volatile bool    fileWritable;
     volatile uint32_t fileSize;
     volatile uint8_t lastResult;    // an FRESULT
     volatile uint32_t lastMountMs;

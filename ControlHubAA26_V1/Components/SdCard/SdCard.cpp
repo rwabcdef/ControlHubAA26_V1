@@ -15,7 +15,8 @@ SdCard::SdCard(SD_HandleTypeDef* hsd, FATFS* fs, const char* drivePath,
   : hsd(hsd), fs(fs), drivePath(drivePath),
     detectPort(detectPort), detectPin(detectPin), detectActive(detectActive),
     file(),
-    mounted(false), fileOpen(false), fileSize(0U), lastResult(FR_OK),
+    mounted(false), fileOpen(false), fileWritable(false), fileSize(0U),
+    lastResult(FR_OK),
     lastMountMs(0U),
     present(false), candidate(false), candidateSinceMs(0U)
 {
@@ -86,9 +87,11 @@ bool SdCard::poll()
   {
     /* Already gone, so this is bookkeeping. f_close() does ask the card
        for its status first (CMD13), which just times out in hardware
-       after 64 clocks and fails - harmless, since a read-only file has
-       nothing to flush, and unmounting clears its _FS_LOCK entry anyway.
-       The result kept is FR_NOT_READY, so the status says why it went. */
+       after 64 clocks and fails - harmless for a read file, and
+       unmounting clears its _FS_LOCK entry anyway. A write file loses
+       whatever was written since its last sync - which is why the SDC00
+       line writes sync every time (see write()). The result kept is
+       FR_NOT_READY, so the status says why it went. */
     this->unmount();
     this->resetInterface();
     (void)this->setResult(FR_NOT_READY);
@@ -173,6 +176,27 @@ void SdCard::unmount()
 
 FRESULT SdCard::open(const char* path)
 {
+  return this->openFile(path, FA_READ | FA_OPEN_EXISTING, false);
+}
+
+FRESULT SdCard::openWrite(const char* path, WriteMode mode)
+{
+  /* Write only, never FA_READ as well: read() seeks, and a seek in an
+     append file would make the next write land mid-file. */
+  BYTE flags;
+  switch(mode)
+  {
+    case WriteMode::append:    flags = FA_WRITE | FA_OPEN_APPEND;   break;
+    case WriteMode::createNew: flags = FA_WRITE | FA_CREATE_NEW;    break;
+    case WriteMode::overwrite:
+    default:                   flags = FA_WRITE | FA_CREATE_ALWAYS; break;
+  }
+
+  return this->openFile(path, flags, true);
+}
+
+FRESULT SdCard::openFile(const char* path, BYTE flags, bool writable)
+{
   (void)this->close();
 
   if(!this->mounted)
@@ -189,11 +213,48 @@ FRESULT SdCard::open(const char* path)
     }
   }
 
-  FRESULT result = f_open(&this->file, path, FA_READ | FA_OPEN_EXISTING);
+  FRESULT result = f_open(&this->file, path, flags);
   if(result == FR_OK)
   {
     this->fileOpen = true;
+    this->fileWritable = writable;
     this->fileSize = (uint32_t)f_size(&this->file);
+  }
+
+  return this->setResult(result);
+}
+
+FRESULT SdCard::write(const uint8_t* data, uint32_t len, bool sync,
+                      uint32_t* bytesWritten)
+{
+  *bytesWritten = 0U;
+
+  if(!this->fileOpen)
+  {
+    return this->setResult(FR_INVALID_OBJECT);
+  }
+
+  if(!this->fileWritable)
+  {
+    return this->setResult(FR_DENIED);
+  }
+
+  UINT done = 0U;
+  FRESULT result = f_write(&this->file, data, (UINT)len, &done);
+  *bytesWritten = (uint32_t)done;
+  this->fileSize = (uint32_t)f_size(&this->file);
+
+  /* FatFs reports a full volume as success with fewer bytes written. */
+  if((result == FR_OK) && (done < len))
+  {
+    result = FR_DENIED;
+  }
+
+  /* f_sync() writes the data, the FAT and the directory entry (size)
+     back to the card, as f_close() would, but leaves the file open. */
+  if((result == FR_OK) && sync)
+  {
+    result = f_sync(&this->file);
   }
 
   return this->setResult(result);
@@ -207,6 +268,13 @@ FRESULT SdCard::read(uint32_t offset, uint8_t* buffer, uint32_t len,
   if(!this->fileOpen)
   {
     return this->setResult(FR_INVALID_OBJECT);
+  }
+
+  /* f_read() would refuse too, but only after the seek had moved the
+     write position - see openWrite(). */
+  if(this->fileWritable)
+  {
+    return this->setResult(FR_DENIED);
   }
 
   /* Read only, so f_lseek() past the end stops at the end rather than
@@ -231,7 +299,10 @@ FRESULT SdCard::close()
     return FR_OK;
   }
 
+  /* For a write file this is where any unsynced data, and the final
+     size, reach the card. */
   this->fileOpen = false;
+  this->fileWritable = false;
   this->fileSize = 0U;
   return this->setResult(f_close(&this->file));
 }
@@ -244,6 +315,11 @@ bool SdCard::isMounted() const
 bool SdCard::isFileOpen() const
 {
   return this->fileOpen;
+}
+
+bool SdCard::isFileWritable() const
+{
+  return this->fileWritable;
 }
 
 uint32_t SdCard::getFileSize() const
