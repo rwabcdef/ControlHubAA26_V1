@@ -4,8 +4,8 @@
 
 //#define SERLINK_CONFIG__MAX_DATA_LEN 50
 
-// Sockets each Transport can hold. transport0 currently uses seven:
-// RAD00, LED01, MOTOR, DBG00, MQTT0, ADC00 and TACHO.
+// Sockets each Transport can hold. transport0 currently uses nine:
+// RAD00, LED01, MOTOR, CTRL0, DBG00, MQTT0, ADC00, TACHO and SDC00.
 //
 // Each slot costs sizeof(Socket) in every Transport object, and there are
 // two of them. A Socket is dominated by its two static queues -

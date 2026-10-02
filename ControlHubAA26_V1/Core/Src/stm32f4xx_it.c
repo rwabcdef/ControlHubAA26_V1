@@ -64,7 +64,7 @@ extern TIM_HandleTypeDef htim8;
 extern TIM_HandleTypeDef htim6;
 
 /* USER CODE BEGIN EV */
-
+extern SD_HandleTypeDef hsd;   /* main.c - for SDIO_IRQHandler, below */
 /* USER CODE END EV */
 
 /******************************************************************************/
@@ -298,6 +298,24 @@ void DMA2_Stream6_IRQHandler(void)
 void EXTI4_IRQHandler(void)
 {
   HAL_GPIO_EXTI_IRQHandler(GPIO_PIN_4);
+}
+
+/**
+  * @brief This function handles the SDIO global interrupt.
+  *
+  * Write completion and all SD data errors arrive here - see the NVIC
+  * note in HAL_SD_MspInit() (stm32f4xx_hal_msp.c, SDIO_MspInit 1), which
+  * is also where the interrupt is enabled. Like EXTI4 above, it is hand
+  * written because the .ioc does not enable it.
+  *
+  * If "SDIO global interrupt" is ever ticked in CubeMX (SDIO > NVIC
+  * Settings), CubeMX generates its own SDIO_IRQHandler and NVIC setup:
+  * the duplicate symbol is a link error, not a silent conflict. Delete
+  * this handler and the NVIC lines in SDIO_MspInit 1 at that point.
+  */
+void SDIO_IRQHandler(void)
+{
+  HAL_SD_IRQHandler(&hsd);
 }
 
 /* USER CODE END 1 */

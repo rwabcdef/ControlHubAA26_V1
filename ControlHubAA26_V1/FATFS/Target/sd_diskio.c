@@ -22,6 +22,16 @@
 
 /* USER CODE BEGIN firstSection */
 /* can be used to modify / undefine following code or add new definitions */
+
+/* The SDIO DMA streams move words (MemDataAlignment WORD, 4-beat bursts),
+   so a destination that is not 4 byte aligned does not fail - the DMA
+   just writes to the aligned address below it, and the data lands in the
+   wrong place. f_read() DMAs whole sectors straight into the caller's
+   buffer, so any odd buffer could hit this. With the scratch buffer on,
+   an unaligned SD_read()/SD_write() goes one sector at a time through an
+   aligned 512 byte buffer instead; aligned ones still take the fast path. */
+#define ENABLE_SCRATCH_BUFFER
+
 /* USER CODE END firstSection*/
 
 /* Includes ------------------------------------------------------------------*/
@@ -665,17 +675,44 @@ void BSP_SD_ReadCpltCallback(void)
 }
 
 /* USER CODE BEGIN ErrorAbortCallbacks */
-/*
+
+/* A DMA transfer that fails (data CRC fail, data timeout, overrun, DMA
+   transfer error) ends in the HAL's SDIO interrupt with an abort, and
+   then HAL_SD_ErrorCallback() - or HAL_SD_AbortCallback() if the abort
+   itself found no error. As generated, neither reaches SDQueueID, so
+   SD_read()/SD_write() sat out the full SD_TIMEOUT (30 s) before giving
+   up with RES_ERROR, and f_mount()/f_read() returned FR_DISK_ERR half a
+   minute late. Any message other than READ_CPLT_MSG/WRITE_CPLT_MSG makes
+   them give up at once instead.
+
+   The template's RW_ERROR_MSG/RW_ABORT_MSG defines are commented out
+   above (outside a USER CODE block), hence the values here. */
+#define SD_RW_ERROR_MSG    ((uint16_t)3)
+#define SD_RW_ABORT_MSG    ((uint16_t)4)
+
+/* Both run in the SDIO or DMA interrupt (priority 5), so the post must
+   not block - timeout 0. */
+static void SD_PostFailure(uint16_t msg)
+{
+  if (SDQueueID != NULL)
+  {
+    osMessageQueuePut(SDQueueID, (const void *)&msg, 0, 0);
+  }
+}
+
+/* Overrides the __weak one in bsp_driver_sd.c (via HAL_SD_AbortCallback). */
 void BSP_SD_AbortCallback(void)
 {
-#if (osCMSIS < 0x20000U)
-   osMessagePut(SDQueueID, RW_ABORT_MSG, 0);
-#else
-   const uint16_t msg = RW_ABORT_MSG;
-   osMessageQueuePut(SDQueueID, (const void *)&msg, 0, 0);
-#endif
+  SD_PostFailure(SD_RW_ABORT_MSG);
 }
-*/
+
+/* Overrides the HAL's __weak one; bsp_driver_sd.c does not forward this. */
+void HAL_SD_ErrorCallback(SD_HandleTypeDef *hsd)
+{
+  (void)hsd;
+  SD_PostFailure(SD_RW_ERROR_MSG);
+}
+
 /* USER CODE END ErrorAbortCallbacks */
 
 /* USER CODE BEGIN lastSection */

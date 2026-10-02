@@ -427,6 +427,18 @@ static void MX_SDIO_SD_Init(void)
   hsd.Init.ClockDiv = 0;
   /* USER CODE BEGIN SDIO_Init 2 */
 
+  /* SDIO_CK = 48 MHz / (ClockDiv + 2). The .ioc's 0 is 24 MHz, which is
+     asking a lot of the jumper wires from CN8 to the card header; 4 gives
+     8 MHz (4 MB/s on the 4 bit bus) while the wiring is unproven. Lower it
+     towards 0 once reads are seen to be clean.
+
+     Only the transfer clock: HAL_SD_InitCard() identifies the card at
+     400 kHz regardless, and BSP_SD_Init() applies this one when it
+     switches to the 4 bit bus. Neither runs here - with FATFS enabled,
+     MX_SDIO_SD_Init() only fills hsd in, and the first f_mount() brings
+     the card up (see SdCard.hpp). */
+  hsd.Init.ClockDiv = 4;
+
   /* USER CODE END SDIO_Init 2 */
 
 }

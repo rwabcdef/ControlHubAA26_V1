@@ -139,6 +139,7 @@
 									<listOptionValue builtIn="false" value="../Components/Controller"/>
 									<listOptionValue builtIn="false" value="../Components/Lift"/>
 									<listOptionValue builtIn="false" value="../Components/Adc"/>
+									<listOptionValue builtIn="false" value="../Components/SdCard"/>
 									<listOptionValue builtIn="false" value="../Core/Inc"/>
 									<listOptionValue builtIn="false" value="../LWIP/App"/>
 									<listOptionValue builtIn="false" value="../LWIP/Target"/>
@@ -355,6 +356,7 @@
 									<listOptionValue builtIn="false" value="../Components/Tachometer"/>
 									<listOptionValue builtIn="false" value="../Components/Controller"/>
 									<listOptionValue builtIn="false" value="../Components/Lift"/>
+									<listOptionValue builtIn="false" value="../Components/SdCard"/>
 									<listOptionValue builtIn="false" value="../Core/Inc"/>
 									<listOptionValue builtIn="false" value="../LWIP/App"/>
 									<listOptionValue builtIn="false" value="../LWIP/Target"/>

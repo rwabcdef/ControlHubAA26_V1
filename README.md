@@ -115,3 +115,25 @@ PB12 (CN12 pin 16)
 Both are GPIO inputs with no internal pull (set in the .ioc), so each button
 needs an external pull-up or pull-down. Not yet read by the firmware.
 #--------------------------------------------------------------------
+## SD card (SDIO, 4 bit, FatFs) - 10 pin card header to CN8
+
+Card header pin -> CN8 pin:
+
+1  DAT3 (~CS)   -> CN8 8    PC11  SDIO_D3
+2  CMD  (MOSI)  -> CN8 12   PD2   SDIO_CMD
+3  DAT0 (MISO)  -> CN8 2    PC8   SDIO_D0
+4  SCK          -> CN8 10   PC12  SDIO_CK
+7  DAT1         -> CN8 4    PC9   SDIO_D1
+8  DAT2         -> CN8 6    PC10  SDIO_D2
+9  CD           -> CN8 14   PG2   card detect (GPIO input, pulled up)
+5/11 GND        -> CN8 11 or 13
+6/12 VCC 3.3V   -> CN8 7    +3.3V
+
+!! CN8 pin 9 is +5V - do NOT use it to power the card. !!
+
+PG2 is not claimed in the .ioc - SdCard::init() configures it at runtime. CD is
+taken as active low (card in = GND); if the status reads A with a card in, flip
+SDCARD_DETECT_ACTIVE in main_tasks.cpp. The SDIO bus runs at 8 MHz (ClockDiv 4,
+main.c USER CODE SDIO_Init 2) while on jumper wires. The card must be FAT/FAT32
+(exFAT is off). Driven by the SDC00 socket over uart2 - see main_tasks.cpp.
+#--------------------------------------------------------------------

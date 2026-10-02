@@ -51,11 +51,11 @@ error-prone; prefer the IDE's project properties.
 `Drivers/` tree. Hand edits in those files survive only inside `/* USER CODE BEGIN x */`
 … `/* USER CODE END x */` markers. Anything substantial belongs in the C++ layer instead.
 
-PB8 (motor `/STBY`) and PF4 (tachoB input, EXTI4) are deliberately not claimed in the
-`.ioc` — `TC78H611FNG_Standby` and `Tachometer::init()` configure them at runtime, and
-`EXTI4_IRQHandler` is hand-written in `stm32f4xx_it.c`. For the same reason nothing stops
-a future CubeMX edit handing either pin to a peripheral; see the notes in
-`Core/Src/main_tasks.cpp`.
+PB8 (motor `/STBY`), PF4 (tachoB input, EXTI4) and PG2 (SD card detect) are deliberately
+not claimed in the `.ioc` — `TC78H611FNG_Standby`, `Tachometer::init()` and `SdCard::init()`
+configure them at runtime, and `EXTI4_IRQHandler` is hand-written in `stm32f4xx_it.c`. For
+the same reason nothing stops a future CubeMX edit handing any of them to a peripheral; see
+the notes in `Core/Src/main_tasks.cpp`.
 
 USER CODE blocks that matter and are easy to lose:
 
@@ -65,6 +65,23 @@ USER CODE blocks that matter and are easy to lose:
   including `PWM::init()`'s own.
 - `freertos.c`, `USER CODE 4` — must stay *without* a `vApplicationStackOverflowHook`
   stub. The real hook is in `main_tasks.cpp`; a stub here is a duplicate-symbol link error.
+- SDIO, four blocks. The SDIO global interrupt is **not** enabled in the `.ioc`, so it is
+  hand-written instead: `SDIO_IRQHandler` in `stm32f4xx_it.c` `USER CODE 1`, and its NVIC
+  enable (priority 5) plus pull-ups on CMD/D0–D3 in `stm32f4xx_hal_msp.c` `SDIO_MspInit 1`.
+  Without the interrupt, SD writes never complete. Errors also need `sd_diskio.c`'s
+  `ErrorAbortCallbacks` block, which overrides `HAL_SD_ErrorCallback` /
+  `BSP_SD_AbortCallback` to post to the disk layer's queue; without it a failed transfer
+  hangs for the 30 s `SD_TIMEOUT` and then returns `FR_DISK_ERR`. If the interrupt is ever ticked in CubeMX, delete the
+  hand-written copies (duplicate-symbol link error otherwise). `main.c` `SDIO_Init 2`
+  overrides `ClockDiv` to 4 (8 MHz) for the jumper wiring, whatever the `.ioc` says, and
+  `sd_diskio.c` `firstSection` defines `ENABLE_SCRATCH_BUFFER` so an unaligned `f_read`
+  buffer cannot be silently corrupted by the word-wide SDIO DMA.
+- Not USER CODE, but related: ST's `FatFs/src/diskio.c` initialises the SD card only once
+  per boot (`disk.is_initialized[]` is never cleared), so a re-inserted card is never
+  re-identified and its first read hangs 30 s. `SdCard::mount()` clears the flag before
+  each `f_mount()`, and also `HAL_SD_DeInit()`s the SDIO (which `SDIO_MspDeInit 1` follows
+  with a peripheral reset), so every mount takes the same `MspInit` path as the boot
+  mount. Keep both if the mount path is ever rewritten.
 
 ## Architecture
 
@@ -113,7 +130,7 @@ Layers, bottom to top (`Frame` ↔ `Reader`/`Writer` ↔ `Transport` ↔ `Socket
 - **`Socket`** — `transport.acquireSocket("PROTO", receiveCallback, instantHandler)`.
   **`SERLINK_CONFIG__MAX_SOCKETS` is 10** (`SerLink_config.hpp`, per transport) and an
   acquire past the limit returns a silent `nullptr`, so every socket pointer is checked
-  before use. transport0 holds eight (RAD00, LED01, MOTOR, CTRL0, ADC00, TACHO, and DBG00 /
+  before use. transport0 holds nine (RAD00, LED01, MOTOR, CTRL0, ADC00, TACHO, SDC00, and DBG00 /
   MQTT0 acquired later from their own tasks); transport2 holds DBG00, CTRL0 and LIFT0.
   A socket belongs to one transport, but a handler does not — the same handler functions
   can back sockets on several transports (CTRL0 on uart2 and MQTT drive the same
@@ -172,7 +189,7 @@ not corruption.
 
 `Components/` holds hardware abstractions used by the application (`Led`, `Button`, `PWM`,
 `Motor/TC78H611FNG`, `Motor/L293D`, `Adc`, `Tachometer`, `Controller`, `Lift`,
-`nRF24L01`, `Radio`, `Mqtt`, `Adapters`). `HAL/` holds thin
+`SdCard`, `nRF24L01`, `Radio`, `Mqtt`, `Adapters`). `HAL/` holds thin
 per-peripheral C wrappers over CubeMX's handles (`uart2`, `spi5`) that CubeMX does not
 generate.
 
@@ -234,7 +251,8 @@ and MQTT.
 USART2 registers, so no debugger is needed. Most task stacks are 256 words. Any task that
 calls into the MQTT client (mqttTask, mqttRxTask, mqtt2Task, writer2Task, reader2Task)
 gets `MQTT_TASK_STACK_SIZE` (2 KB), because an MQTT publish runs the whole lwIP send
-path on the *caller's* stack, and 1 KB overflowed within seconds. Before trimming any
+path on the *caller's* stack, and 1 KB overflowed within seconds. sdCardTask also gets
+2 KB, because FatFs keeps its 512-byte long-file-name buffer on the caller's stack. Before trimming any
 stack, check `DBG00T349002SL` (the task with the least stack free) or `DBG00T349003Snn`
 (task nn by index).
 
@@ -256,7 +274,8 @@ server runs from `Core/Src/httpd_app.c`.
 USART2 on **PD5 (TX) / PD6 (RX)** via an FTDI cable on CN9 — *not* the ST-LINK virtual COM
 port (that is USART3 on PD8/PD9). 115200 baud, CR+LF line ends. Typing a frame into a
 terminal is the primary way to drive the board; worked examples for the DBG00, LED01,
-MOTOR, CTRL0, LIFT0, ADC00 and TACHO sockets are at the top of `Core/Src/main_tasks.cpp`.
+MOTOR, CTRL0, LIFT0, ADC00, TACHO and SDC00 (SD card) sockets are at the top of
+`Core/Src/main_tasks.cpp`.
 LIFT0 exists only on SerLink2, so it has to go over MQTT (`mosquitto_pub` to
 `hub/aa26/serlink/down`), not the serial console.
 

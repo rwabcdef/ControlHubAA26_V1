@@ -261,6 +261,38 @@ void HAL_SD_MspInit(SD_HandleTypeDef* hsd)
 
     /* USER CODE BEGIN SDIO_MspInit 1 */
 
+    /* CMD and D0-D3 are open drain on the card side during identification
+       and idle high, so the SD spec wants them pulled up (10k-100k). CubeMX
+       leaves them floating. The internal ~40k pull-ups are enough at the
+       clock MX_SDIO_SD_Init() sets; if the card module has its own, the two
+       just sit in parallel. CK is driven both ways, so no pull. */
+    GPIO_InitStruct.Pin = GPIO_PIN_8|GPIO_PIN_9|GPIO_PIN_10|GPIO_PIN_11;
+    GPIO_InitStruct.Mode = GPIO_MODE_AF_PP;
+    GPIO_InitStruct.Pull = GPIO_PULLUP;
+    GPIO_InitStruct.Speed = GPIO_SPEED_FREQ_VERY_HIGH;
+    GPIO_InitStruct.Alternate = GPIO_AF12_SDIO;
+    HAL_GPIO_Init(GPIOC, &GPIO_InitStruct);
+
+    GPIO_InitStruct.Pin = GPIO_PIN_2;
+    HAL_GPIO_Init(GPIOD, &GPIO_InitStruct);
+
+    /* The SDIO global interrupt. It is not enabled in the .ioc, so CubeMX
+       generates neither this nor the vector (SDIO_IRQHandler is hand
+       written in stm32f4xx_it.c, USER CODE 1).
+
+       Reads complete from the DMA interrupt alone, but write completion
+       and every data error (CRC fail, data timeout, overrun) are only
+       reported through HAL_SD_IRQHandler(). The errors then still have to
+       reach sd_diskio.c, which is what its ErrorAbortCallbacks USER CODE
+       block does - without both, a failed read waits out the full 30 s
+       SD_TIMEOUT before returning an error.
+
+       Priority 5, the same as the SDIO DMA streams: the completion
+       callbacks post to an RTOS queue, so it must not be above
+       configLIBRARY_MAX_SYSCALL_INTERRUPT_PRIORITY. */
+    HAL_NVIC_SetPriority(SDIO_IRQn, 5, 0);
+    HAL_NVIC_EnableIRQ(SDIO_IRQn);
+
     /* USER CODE END SDIO_MspInit 1 */
 
   }
@@ -300,6 +332,14 @@ void HAL_SD_MspDeInit(SD_HandleTypeDef* hsd)
     HAL_DMA_DeInit(hsd->hdmarx);
     HAL_DMA_DeInit(hsd->hdmatx);
     /* USER CODE BEGIN SDIO_MspDeInit 1 */
+
+    HAL_NVIC_DisableIRQ(SDIO_IRQn);   /* enabled in SDIO_MspInit 1 */
+
+    /* Reset the whole peripheral, so the next HAL_SD_Init() starts from
+       power-on register values exactly as at boot - SdCard de-inits
+       before every mount for that reason (see SdCard::resetInterface()). */
+    __HAL_RCC_SDIO_FORCE_RESET();
+    __HAL_RCC_SDIO_RELEASE_RESET();
 
     /* USER CODE END SDIO_MspDeInit 1 */
   }

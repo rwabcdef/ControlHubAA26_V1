@@ -108,6 +108,40 @@ ADC00T529002GA      # all four channels, raw
 TACHOU001011R0432.00017   # 432 RPM, 17 glitches rejected since boot.
                           # 'U', so the board expects no ack back
 
+# SD card socket - SDC00, over SerLink0 (uart2). Read only. See the SD
+# card block below initTasks()'s globals for the wiring, and SdCard.hpp.
+#
+# Status <S><P|A><M|U><O|C>.<rr>: card Present/Absent, volume Mounted/
+# Unmounted, a file Open/Closed, and the last FatFs result (FRESULT, 2
+# digits: 00 ok, 03 not ready, 04 no such file, 13 not FAT). The board
+# sends it by itself when a card is inserted (once mounted, or not) or
+# removed, and the read answers it on the ack:
+SDC00T560001S              # -> SDC00A560007SPMC.00   present, mounted, no file
+SDC00U001007SPMC.00        # sent by the board: card inserted and mounted
+SDC00U002007SAUC.03        # sent by the board: card removed
+SDC00T564001E              # diagnostics -> SDC00A564015E00000008.00041
+                           #   HAL SD error code (hex HAL_SD_ERROR_* bits, of
+                           #   the most recent transfer) . last mount in ms
+                           #   See writeSdDiagnostics() for the common bits.
+
+# Commands - plain ACK_OK, then the answer arrives as a frame of its own,
+# because the SD work happens in sdCardTask, not on the link's task.
+SDC00T561009OREAD.TXT      # open an existing file, read only. Mounts first
+                           # if needed. -> O<rr>.<size, 10 digits>
+                           #    SDC00U003014O00.0000001234
+                           #    SDC00U004014O04.0000000000   (no such file)
+SDC00T562007R0.0100        # read 100 bytes from offset 0 of the open file.
+                           # R<offset 1..9 digits>.<length 1..4 digits>, at
+                           # most SDCARD_READ_MAX (512) bytes. The data comes
+                           # back as D frames, then R<rr>.<bytes read>:
+                           #    SDC00U005064DHello world\0D\0A...
+                           #    SDC00U006008R00.0100
+                           # Printable ASCII as is, '\' as '\\', any other
+                           # byte as '\' + 2 hex digits (\0D\0A is CR LF), so
+                           # binary survives and text stays readable. Past the
+                           # end reads short (fewer bytes, rr still 00).
+SDC00T563001C              # close the file -> C<rr>, e.g. SDC00U007003C00
+
  */
 
 #include <cstdio>
@@ -131,6 +165,7 @@ TACHOU001011R0432.00017   # 432 RPM, 17 glitches rejected since boot.
 #include "Tachometer.hpp"
 #include "Controller.hpp"
 #include "Lift.hpp"
+#include "SdCard.hpp"
 #include "nRF24L01.hpp"
 #include "spi5.h"
 #include "Radio.hpp"
@@ -324,6 +359,17 @@ const osThreadAttr_t serLink2Task_attributes = {
   .priority = (osPriority_t) osPriorityNormal,
 };
 
+/* Definitions for sdCardTask */
+// Owns sdCard, so every FatFs call happens here. 2 KB: FatFs puts its
+// 512 byte long file name buffer on the caller's stack, on top of its own
+// frames and the SD disk layer's - see Threading in SdCard.hpp.
+osThreadId_t sdCardTaskHandle;
+const osThreadAttr_t sdCardTask_attributes = {
+  .name = "sdCardTask",
+  .stack_size = 512 * 4,
+  .priority = (osPriority_t) osPriorityNormal,
+};
+
 //--------------------------------------------------------------
 void startWriter0Task(void *argument);
 void startReader0Task(void *argument);
@@ -345,6 +391,7 @@ void startMqtt2Task(void *argument);
 void startWriter2Task(void *argument);
 void startReader2Task(void *argument);
 void startSerLink2Task(void *argument);
+void startSdCardTask(void *argument);
 
 bool debugSockInstantHandler(SerLink::Frame &rxFrame, uint16_t* dataLen, char* data);
 
@@ -365,6 +412,11 @@ bool liftSockInstantHandler(SerLink::Frame &rxFrame, uint16_t* dataLen, char* da
 
 // ADC00 socket handler - reads only, documented above its implementation.
 bool adcSockInstantHandler(SerLink::Frame &rxFrame, uint16_t* dataLen, char* data);
+
+// SDC00 socket handlers - SD card commands, documented at the top of the
+// file and above their implementations.
+void sdSockReceiveHandler(const char* data, uint16_t dataLen);
+bool sdSockInstantHandler(SerLink::Frame &rxFrame, uint16_t* dataLen, char* data);
 
 // This is called by transport0 when a frame is received.
 void transport0ReceiveCallback(const char* data, uint16_t dataLen){ 
@@ -750,6 +802,91 @@ Adc adc1(&hadc1, &htim2, ADC1_NUM_CHANNELS);
 SerLink::Socket* adcSocket = nullptr;
 
 //--------------------------------------------------------------
+// SD card - SDIO, 4 bit, through FatFs. See SdCard.hpp.
+//
+// Wired to CN8 (UM1974 Table 19, the SDMMC/I2S_A group), which carries
+// the SDIO pins in a row. Card header pin -> CN8 pin:
+//
+//   1  DAT3 (~CS)   -> CN8 8    PC11  SDIO_D3
+//   2  CMD  (MOSI)  -> CN8 12   PD2   SDIO_CMD
+//   3  DAT0 (MISO)  -> CN8 2    PC8   SDIO_D0
+//   4  SCK          -> CN8 10   PC12  SDIO_CK
+//   7  DAT1         -> CN8 4    PC9   SDIO_D1
+//   8  DAT2         -> CN8 6    PC10  SDIO_D2
+//   9  CD           -> CN8 14   PG2   GPIO input (card detect)
+//   5/11 GND        -> CN8 11 or 13
+//   6/12 VCC 3.3 V  -> CN8 7    +3.3 V   - NOT CN8 9, which is +5 V
+//
+// The SPI names on the card header are the same contacts in SPI mode;
+// SDIO uses them as DAT3/CMD/DAT0.
+//
+// CD: PG2 is CN8 14, next to the SDIO group, and otherwise unused. Like
+// PB8 and PF4 it is not claimed in the .ioc - SdCard::init() configures
+// it - so nothing stops a future CubeMX edit handing it to a peripheral;
+// claim it there if this becomes permanent.
+//
+// SDCARD_DETECT_ACTIVE is the level CD reads with a card in. Most sockets
+// switch CD to GND on insertion, hence GPIO_PIN_RESET, with SdCard::init()
+// pulling the pin up. If the status reads A with a card in and P without,
+// flip it to GPIO_PIN_SET. If CD is not wired at all, set
+// SDCARD_DETECT_PORT to nullptr: the card then always reads present.
+//
+// The bus extras CubeMX does not do - the pull-ups, the SDIO interrupt,
+// the 8 MHz clock - are in USER CODE blocks; see SdCard.hpp for where.
+#define SDCARD_DETECT_PORT    GPIOG
+#define SDCARD_DETECT_PIN     GPIO_PIN_2
+#define SDCARD_DETECT_ACTIVE  GPIO_PIN_RESET
+
+// sdCardTask wakes at least this often to poll the card detect pin (the
+// debounce itself is SdCard::DETECT_SETTLE_MS).
+#define SDCARD_POLL_MS        50U
+
+// The most one SDC00 read command returns. The data goes out as D frames,
+// up to 63 characters each, and an unprintable byte takes 3 - so 512
+// bytes is 9 frames of text, or 25 of binary.
+#define SDCARD_READ_MAX       512U
+
+// The gap after each frame sdCardTask sends. A read reply is a burst of
+// frames, but transport0's queue and writer0's are 5 deep each, and
+// writer0 drops a frame silently when its queue is full - so pace the
+// burst instead. A full 78 character frame takes ~7 ms at 115200 baud,
+// so this leaves room for everyone else's frames too.
+#define SDCARD_FRAME_GAP_MS   20U
+#define SDCARD_SEND_TRIES     5U
+
+// main.c's SDIO handle; fatfs.c's volume (SDFatFS) and drive path
+// (SDPath, "0:/"), which MX_FATFS_Init() links to the SD driver before
+// initTasks() runs.
+extern SD_HandleTypeDef hsd;
+
+SdCard sdCard(&hsd, &SDFatFS, SDPath,
+              SDCARD_DETECT_PORT, SDCARD_DETECT_PIN, SDCARD_DETECT_ACTIVE);
+
+// An SDC00 command, parsed by sdSockReceiveHandler() in serLink0Task and
+// carried to sdCardTask, which owns sdCard - the same arrangement as
+// LiftCmd. The path travels in the item, so it cannot be overwritten by
+// the next command before it is used.
+struct SdCmd
+{
+  enum op_t : uint8_t { open, read, close };
+
+  op_t     op;
+  uint32_t offset;                                // read
+  uint32_t len;                                   // read
+  char     path[SerLink::Frame::MAX_DATALEN];     // open, NUL terminated
+};
+
+// One command at a time is what a terminal sends; 2 allows an open and
+// a read typed back to back. Full, a command is dropped - after its ack.
+#define SDCARD_CMD_QUEUE_LENGTH 2
+StaticQueue_t sdCmdStaticQueue;
+uint8_t sdCmdQueueStorageArea[SDCARD_CMD_QUEUE_LENGTH * sizeof(SdCmd)];
+QueueHandle_t sdCmdQueue;
+
+// Acquired on transport0 (uart2).
+SerLink::Socket* sdSocket = nullptr;
+
+//--------------------------------------------------------------
 // nRF24L01 radio on SPI5. The driver owns CE (PF6) and CSN (PF10); spi5
 // itself handles only SCK/MISO/MOSI, so the bus stays free for other slaves.
 // These three must agree with the transmitter. The values below are the
@@ -947,9 +1084,9 @@ void initTasks()
      reader/writer setup it depends on. Still before the scheduler
      starts, so no task can see the socket half-registered.
 
-     transport0 holds eight of the SERLINK_CONFIG__MAX_SOCKETS slots -
-     RAD00, LED01, MOTOR, CTRL0, ADC00 and TACHO here, DBG00 and MQTT0
-     later, from their own tasks. An acquire past the limit returns a
+     transport0 holds nine of the SERLINK_CONFIG__MAX_SOCKETS slots -
+     RAD00, LED01, MOTOR, CTRL0, ADC00, TACHO and SDC00 here, DBG00 and
+     MQTT0 later, from their own tasks. An acquire past the limit returns a
      silent nullptr, which is why every socket pointer is checked before
      use. */
   motorSocket = transport0.acquireSocket("MOTOR", motorSockReceiveHandler,
@@ -973,6 +1110,19 @@ void initTasks()
   adc1.start();
 
   adcTaskHandle = osThreadNew(startAdcTask, NULL, &adcTask_attributes);
+
+  /* SD card. init() only sets up the card detect pin - the card itself
+     cannot be touched until the scheduler runs (see SdCard.hpp), so
+     sdCardTask mounts it on its first polls. The command queue comes
+     before the socket that posts to it, and both before the task that
+     drains it. Commands in serLink0Task, the status read on the ack. */
+  sdCard.init();
+  sdCmdQueue = xQueueCreateStatic(SDCARD_CMD_QUEUE_LENGTH, sizeof(SdCmd),
+    sdCmdQueueStorageArea, &sdCmdStaticQueue);
+  sdSocket = transport0.acquireSocket("SDC00", sdSockReceiveHandler,
+    sdSockInstantHandler);
+
+  sdCardTaskHandle = osThreadNew(startSdCardTask, NULL, &sdCardTask_attributes);
 
   writer0TaskHandle = osThreadNew(startWriter0Task, NULL, &writer0Task_attributes);
 
@@ -2082,6 +2232,348 @@ void startControlBTask(void *argument)
     }
 
     vTaskDelayUntil(&xLastWakeTime, xFrequency);
+  }
+}
+
+//--------------------------------------------------------------
+// SDC00 socket - the SD card over SerLink0 (uart2). The command set and
+// the answers are at the top of the file.
+//
+// The status read is answered on the ack (sdSockInstantHandler, in
+// reader0Task) from SdCard's getters. Everything that touches the card -
+// open, read, close - is posted to sdCardTask instead, because FatFs
+// blocks on the SD DMA and only sdCardTask may call it (Threading in
+// SdCard.hpp). Those answer with 'U' frames of their own once done; a
+// malformed command is dropped silently after its ack, as elsewhere.
+
+#define SDCARD_STATUS_LEN       7U    // S<P|A><M|U><O|C>.<rr>
+#define SDCARD_RESULT_WIDTH     2U    // FRESULT, 0..19
+#define SDCARD_SIZE_WIDTH       10U   // a uint32_t file size
+#define SDCARD_OFFSET_MAX_WIDTH 9U    // so a typed offset cannot overflow
+#define SDCARD_LEN_MAX_WIDTH    4U    // SDCARD_READ_MAX fits in 4 digits
+
+static_assert(SDCARD_READ_MAX <= 9999U,
+  "SDC00 read lengths are 4 digits on the wire");
+
+// Read data lands here, not on sdCardTask's stack. Word aligned so the
+// SD DMA can fill it directly - sd_diskio.c would cope with an unaligned
+// buffer (ENABLE_SCRATCH_BUFFER), but only a sector at a time.
+alignas(4) static uint8_t sdReadBuffer[SDCARD_READ_MAX];
+
+// BSP_SD_Init() asks this before it touches the card. The generated one in
+// bsp_driver_sd.c is __weak and always answers present; this replaces it.
+// extern "C" or it would not: a mangled name leaves the weak one live,
+// and the link still succeeds (see app_main.cpp).
+extern "C" uint8_t BSP_SD_IsDetected(void)
+{
+  return sdCard.isCardPresent() ? SD_PRESENT : SD_NOT_PRESENT;
+}
+
+// S<P|A><M|U><O|C>.<rr> - the status read and the board's own status
+// frames. Getters only, so it is safe from reader0Task.
+static void writeSdStatus(char* dst)
+{
+  dst[0] = 'S';
+  dst[1] = sdCard.isCardPresent() ? 'P' : 'A';
+  dst[2] = sdCard.isMounted()     ? 'M' : 'U';
+  dst[3] = sdCard.isFileOpen()    ? 'O' : 'C';
+  dst[4] = '.';
+  writeUintField((uint32_t)sdCard.getLastResult(), SDCARD_RESULT_WIDTH, &dst[5]);
+}
+
+// sdCardTask only. Sends one 'U' frame, then waits SDCARD_FRAME_GAP_MS -
+// see there for why. sendData() fails only with transport0's queue full,
+// so that is retried a few times before the frame is given up.
+static void sdSend(char* data, uint16_t dataLen)
+{
+  if(sdSocket == nullptr)
+  {
+    return;
+  }
+
+  for(uint8_t tries = 0U; tries < SDCARD_SEND_TRIES; tries++)
+  {
+    if(sdSocket->sendData(data, dataLen, false))
+    {
+      break;
+    }
+    osDelay(SDCARD_FRAME_GAP_MS);
+  }
+
+  osDelay(SDCARD_FRAME_GAP_MS);
+}
+
+// One byte of read data, escaped for a frame: printable ASCII as is, '\'
+// doubled, anything else as '\' and two hex digits. CR and LF have to go
+// that way in any case - a raw newline would end the frame on the wire.
+// Returns the characters written to dst, 1 to 3.
+static uint8_t escapeSdByte(uint8_t value, char* dst)
+{
+  static const char hexDigits[] = "0123456789ABCDEF";
+
+  if(value == (uint8_t)'\\')
+  {
+    dst[0] = '\\';
+    dst[1] = '\\';
+    return 2U;
+  }
+
+  if((value >= 0x20U) && (value <= 0x7EU))
+  {
+    dst[0] = (char)value;
+    return 1U;
+  }
+
+  dst[0] = '\\';
+  dst[1] = hexDigits[value >> 4];
+  dst[2] = hexDigits[value & 0x0FU];
+  return 3U;
+}
+
+// sdCardTask only. The read data as D frames, as full as they will go
+// without splitting an escape across two.
+static void sendSdData(const uint8_t* buffer, uint32_t len)
+{
+  char frameData[SerLink::Frame::MAX_DATALEN];
+  uint16_t frameLen = 1U;
+  frameData[0] = 'D';
+
+  for(uint32_t i = 0U; i < len; i++)
+  {
+    char escaped[3];
+    uint8_t escapedLen = escapeSdByte(buffer[i], escaped);
+
+    if((frameLen + escapedLen) > (uint16_t)SerLink::Frame::MAX_DATALEN)
+    {
+      sdSend(frameData, frameLen);
+      frameLen = 1U;
+    }
+
+    memcpy(&frameData[frameLen], escaped, escapedLen);
+    frameLen = (uint16_t)(frameLen + escapedLen);
+  }
+
+  if(frameLen > 1U)
+  {
+    sdSend(frameData, frameLen);
+  }
+}
+
+// sdCardTask only - carries out one command and sends its answer.
+static void runSdCmd(const SdCmd& cmd)
+{
+  switch(cmd.op)
+  {
+    case SdCmd::open:   // -> O<rr>.<size>
+    {
+      FRESULT result = sdCard.open(cmd.path);
+
+      char reply[1U + SDCARD_RESULT_WIDTH + 1U + SDCARD_SIZE_WIDTH];
+      reply[0] = 'O';
+      writeUintField((uint32_t)result, SDCARD_RESULT_WIDTH, &reply[1]);
+      reply[1U + SDCARD_RESULT_WIDTH] = '.';
+      writeUintField(sdCard.getFileSize(), SDCARD_SIZE_WIDTH,
+        &reply[2U + SDCARD_RESULT_WIDTH]);
+      sdSend(reply, (uint16_t)sizeof(reply));
+      break;
+    }
+
+    case SdCmd::read:   // -> D frames, then R<rr>.<bytes read>
+    {
+      FRESULT result;
+      uint32_t bytesRead = 0U;
+
+      /* Checked here rather than in the receive handler, so a bad length
+         still gets an answer: R19 (FR_INVALID_PARAMETER). */
+      if((cmd.len == 0U) || (cmd.len > SDCARD_READ_MAX))
+      {
+        result = FR_INVALID_PARAMETER;
+      }
+      else
+      {
+        result = sdCard.read(cmd.offset, sdReadBuffer, cmd.len, &bytesRead);
+      }
+
+      /* Whatever arrived, even if the read then failed part way. */
+      sendSdData(sdReadBuffer, bytesRead);
+
+      char reply[1U + SDCARD_RESULT_WIDTH + 1U + SDCARD_LEN_MAX_WIDTH];
+      reply[0] = 'R';
+      writeUintField((uint32_t)result, SDCARD_RESULT_WIDTH, &reply[1]);
+      reply[1U + SDCARD_RESULT_WIDTH] = '.';
+      writeUintField(bytesRead, SDCARD_LEN_MAX_WIDTH,
+        &reply[2U + SDCARD_RESULT_WIDTH]);
+      sdSend(reply, (uint16_t)sizeof(reply));
+      break;
+    }
+
+    case SdCmd::close:  // -> C<rr>
+    {
+      FRESULT result = sdCard.close();
+
+      char reply[1U + SDCARD_RESULT_WIDTH];
+      reply[0] = 'C';
+      writeUintField((uint32_t)result, SDCARD_RESULT_WIDTH, &reply[1]);
+      sdSend(reply, (uint16_t)sizeof(reply));
+      break;
+    }
+
+    default:
+      break;
+  }
+}
+
+// Owns sdCard. Waits for a command for up to SDCARD_POLL_MS, and polls
+// the card detect pin every time round - a mount or an unmount there is
+// reported with a status frame, so a terminal sees the card come and go.
+//
+// sdCard.poll() mounts in this task too, so a card inserted mid-command
+// is only picked up once that command is done - and one pulled out
+// mid-command makes the command fail first.
+void startSdCardTask(void *argument)
+{
+  for(;;)
+  {
+    SdCmd cmd;
+    if(xQueueReceive(sdCmdQueue, &cmd, pdMS_TO_TICKS(SDCARD_POLL_MS)) == pdTRUE)
+    {
+      runSdCmd(cmd);
+    }
+
+    if(sdCard.poll())
+    {
+      char status[SDCARD_STATUS_LEN];
+      writeSdStatus(status);
+      sdSend(status, (uint16_t)sizeof(status));
+    }
+  }
+}
+
+// The commands. Runs in serLink0Task - parses and posts, and never
+// blocks: with the queue full the command is dropped.
+void sdSockReceiveHandler(const char* data, uint16_t dataLen)
+{
+  if(dataLen < 1U)
+  {
+    return;
+  }
+
+  SdCmd cmd = {};
+
+  switch(data[0])
+  {
+    case 'O':   // O<path>
+    {
+      /* The path is the rest of the frame; FatFs takes it NUL terminated. */
+      uint16_t pathLen = (uint16_t)(dataLen - 1U);
+      if((pathLen == 0U) || (pathLen >= sizeof(cmd.path)))
+      {
+        return;
+      }
+      memcpy(cmd.path, &data[1], pathLen);
+      cmd.path[pathLen] = '\0';
+      cmd.op = SdCmd::open;
+      break;
+    }
+
+    case 'R':   // R<offset>.<len>
+    {
+      /* Find the '.', then both fields have to be all digits and within
+         their widths. */
+      uint16_t dot = 1U;
+      while((dot < dataLen) && (data[dot] != '.'))
+      {
+        dot++;
+      }
+
+      uint16_t offsetWidth = (uint16_t)(dot - 1U);
+      uint16_t lenWidth = (uint16_t)(dataLen - dot - 1U);
+      if((dot >= dataLen) ||
+         (offsetWidth == 0U) || (offsetWidth > SDCARD_OFFSET_MAX_WIDTH) ||
+         (lenWidth == 0U) || (lenWidth > SDCARD_LEN_MAX_WIDTH))
+      {
+        return;
+      }
+
+      if(!readUintField(&data[1], (uint8_t)offsetWidth, &cmd.offset) ||
+         !readUintField(&data[dot + 1U], (uint8_t)lenWidth, &cmd.len))
+      {
+        return;
+      }
+
+      cmd.op = SdCmd::read;
+      break;
+    }
+
+    case 'C':   // C
+      if(dataLen != 1U)
+      {
+        return;
+      }
+      cmd.op = SdCmd::close;
+      break;
+
+    case 'S':   // status      - answered on the ack, in sdSockInstantHandler()
+    case 'E':   // diagnostics - likewise
+    default:
+      return;
+  }
+
+  (void)xQueueSend(sdCmdQueue, &cmd, 0U);
+}
+
+// E<hhhhhhhh>.<mmmmm> - the HAL's SD error code (hsd.ErrorCode, the
+// HAL_SD_ERROR_* bits, hex) and how long the last mount took in ms
+// (clamped to 99999). For bring-up: a status of 01 (FR_DISK_ERR) says a
+// transfer failed, this says how. The HAL clears ErrorCode at the start of
+// each operation, so it describes the most recent one. Common bits:
+//   00000002 data CRC fail      00000008 data timeout
+//   00000004 command timeout    00000020 RX overrun
+//   00000001 command CRC fail   40000000 DMA transfer error
+#define SDCARD_DIAG_LEN  (1U + 8U + 1U + 5U)
+
+static void writeSdDiagnostics(char* dst)
+{
+  static const char hexDigits[] = "0123456789ABCDEF";
+
+  /* One aligned word, written by the SDIO/DMA interrupts - reading it
+     here is safe, if possibly a transfer behind. */
+  uint32_t errorCode = hsd.ErrorCode;
+
+  dst[0] = 'E';
+  for(uint8_t i = 0U; i < 8U; i++)
+  {
+    dst[1U + i] = hexDigits[(errorCode >> (28U - (4U * i))) & 0x0FU];
+  }
+  dst[9] = '.';
+
+  uint32_t mountMs = sdCard.getLastMountMs();
+  writeUintField((mountMs > 99999U) ? 99999U : mountMs, 5U, &dst[10]);
+}
+
+// The reads - status and diagnostics. Run in reader0Task, before the ack
+// is sent - getters only.
+bool sdSockInstantHandler(SerLink::Frame &rxFrame, uint16_t* dataLen, char* data)
+{
+  if(rxFrame.dataLen != 1U)
+  {
+    return false;   // a command - leave the ack a plain ACK_OK
+  }
+
+  switch(rxFrame.data[0])
+  {
+    case 'S':
+      writeSdStatus(data);
+      *dataLen = SDCARD_STATUS_LEN;
+      return true;
+
+    case 'E':
+      writeSdDiagnostics(data);
+      *dataLen = SDCARD_DIAG_LEN;
+      return true;
+
+    default:
+      return false;   // C (close) is a command
   }
 }
 
