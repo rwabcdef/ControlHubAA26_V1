@@ -35,12 +35,12 @@ seems to come up as COM5
 
 ## nRF24L01
 SPI5
-  PF7: SPI5_SCK
-  PF8: SPI5_MISO
-  PF9: SPI5_MOSI
-  PF10: GPIO_Output - nRF24L01 SPI (SPI5) SS (CSN)
-  PF6: GPIO_Output - nRF24L01 CE (for controlling Rx/Tx operation)
-  PF5: GPIO_EXTI5 - nRF24L01 nINT
+  PF7: SPI5_SCK                                                        CN11 - pin 11  grey
+  PF8: SPI5_MISO                                                       CN11 - pin 54  blue
+  PF9: SPI5_MOSI                                                       CN11 - pin 56  purple
+  PF10: GPIO_Output - nRF24L01 SPI (SPI5) SS (CSN)                     CN12 - pin 42  yellow
+  PF6: GPIO_Output - nRF24L01 CE (for controlling Rx/Tx operation)     CN11 - pin 9   white
+  PF5: GPIO_EXTI5 - nRF24L01 nINT                                      CN12 - pin 36  green
 #--------------------------------------------------------------------
 ## MQTT
 
