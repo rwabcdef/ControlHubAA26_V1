@@ -246,6 +246,16 @@ class Controller
     // so only a typo gets near it.
     static constexpr float MAX_INTEGRAL_GAIN = 1.0f;
 
+    // Any task. The output cap, percent, from the next pass - the live
+    // copy of config.outputMaxPercent, which is its start. Returns false,
+    // and keeps the old cap, unless outputMinPercent <= percent <= 100 and
+    // percent >= tachoCheckMinPercent: below that the tacho check could
+    // never start counting, and a dead tacho would hold the motor at the
+    // cap for ever (Unresponsive tachometer, above). Lowering it while
+    // driving pulls the output down on the next pass.
+    bool    setOutputMaxPercent(uint8_t percent);
+    uint8_t getOutputMaxPercent() const;
+
     // Any task. enable() hands the motor to the controller from the next
     // run(); disable() hands it back, and nothing more is written.
     // enable() is also how a tacho fault is cleared - see Unresponsive
@@ -297,6 +307,7 @@ class Controller
   private:
     volatile uint16_t requiredRpm;
     volatile float    integralGain;   // the live gain; config.integralGain is its start
+    volatile uint8_t  outputMaxPercent; // the live cap; config.outputMaxPercent is its start
     volatile bool     enabled;
     volatile uint16_t rejectedCount;
     volatile bool     tachoFault;   // written by the owning task only

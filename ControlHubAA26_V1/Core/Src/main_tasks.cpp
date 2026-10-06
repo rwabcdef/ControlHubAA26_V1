@@ -25,68 +25,68 @@
  LIFT0S045004PING    # -> LIFT0A045008PINGBACK over MQTT, but LIFT0A045900
                      #    on serial - LIFT0 is on MQTT only
 
- # led socket - relayed to the radio, and ultimatelty to the remote hub (arduino uno r4)
-LED01U492002A1
-LED01U492002A0
-
-LED01T492002A1
-LED01T492002A0
+ # Modes - hubApp (HubApp.hpp) keeps the hub Idle, in Control (motorB held at a
+ # speed until stopped - from the PC or the remote hub) or in Lift (a liftB
+ # move - from the PC only). Every command that starts, stops or steers the
+ # motor goes through it: a start is ignored unless Idle, and so is a
+ # direction change. CTRL0T529003BGO reads the mode.
 
 # Motor socket - the TC78H611FNG dual H-bridge on TIM8, channel B (IN1B/IN2B on J10 pins 10 and 8)
-MOTORT516005BP050   # open loop: 50% duty (also turns closed loop off)
-MOTORT516005BP010
-MOTORT516006BS0300  # closed loop: hold 300 RPM (controllerB takes over)
-MOTORT529003BGS     # read the required RPM back, 4 digits
+# A bring-up / debug path: P and D drive the bridge directly, Idle only.
+MOTORT516005BP050   # open loop: 50% duty (Idle only)
+MOTORT523003BDF     # open loop: direction forward - starts it (Idle only)
+MOTORT523003BDD     # open loop: stop (direction disabled)
+MOTORT516006BS0300  # = CTRL0 BR0300 + BS: a Control run at 300 RPM
+MOTORT529003BGS     # read the target RPM back, 4 digits
 
-# Control socket - speed controllers. controllerB drives motorB from tachoB.
-# On serial AND on MQTT (SerLink2) - two sockets sharing the same handlers,
-# driving the same controllerB, so the last command from either link wins.
+# Control socket - controllerB and Control runs. On serial AND on MQTT
+# (SerLink2) - two sockets sharing the same handlers, both posting to hubApp.
 #
 # Safety limits (see Unresponsive tachometer in Controller.hpp): the duty is
-# capped at CONTROLB_OUTPUT_MAX_PERCENT (50%), and if the tacho reads 0 for
-# CONTROLB_TACHO_TIMEOUT_S (10 s) with a speed demanded and the duty at or
-# above CONTROLB_TACHO_CHECK_MIN_PERCENT (20%), the controller stops
-# the motor (0%, direction D) and latches a tacho fault. The next speed set
-# (BR<dddd>, MOTOR BS<dddd> or a lift start) clears it.
+# capped at the max duty (BM, boot CONTROLB_OUTPUT_MAX_PERCENT 50%), and if
+# the tacho reads 0 for CONTROLB_TACHO_TIMEOUT_S (10 s) with a speed demanded
+# and the duty at or above CONTROLB_TACHO_CHECK_MIN_PERCENT (20%), the
+# controller stops the motor (0%, direction D), latches a tacho fault and the
+# hub goes Idle. The next start clears it.
 
-# start closed loop motor run
-CTRL0T523003BDF     # controllerB: direction forward
-CTRL0T516006BR0120  # controllerB: hold 120 RPM (enables closed loop)
-
-# end closed loop motor run
-CTRL0T516006BR0000
-CTRL0T523003BDD
+# a Control run
+CTRL0T523003BDF     # selected direction forward (Idle only)
+CTRL0T516006BR0120  # target 120 RPM - does not start anything
+CTRL0T523002BS      # start
+CTRL0T523002BX      # stop (a lift move too)
 
 # sets - plain ACK_OK; a malformed set is dropped silently, so read it back
-CTRL0T516006BR0120  # controllerB: hold 120 RPM (enables closed loop)
-CTRL0T523003BDF     # controllerB: direction forward
-CTRL0T523003BDR     # controllerB: direction reverse (F forward, D disabled)
+CTRL0T516006BR0120  # target speed 120 RPM - live if running
+CTRL0T523003BDR     # selected direction reverse (F forward) - Idle only
+CTRL0T516005BM050   # max duty 50% (CONTROLB_TACHO_CHECK_MIN_PERCENT..100) - live
 CTRL0T516008BI002000  # integral gain = 0.002 (6 digits, millionths: 000000..999999).
                       # Next pass, bumpless; lasts until reset (boot value is
                       # CONTROLB_INTEGRAL_GAIN)
 
 # reads - answered on the ack
-CTRL0T529003BGR     # required RPM              -> CTRL0A5290040120
-CTRL0T529003BGD     # direction, F/R/D          -> CTRL0A529001R
+CTRL0T529003BGR     # target RPM                -> CTRL0A5290040120
+CTRL0T529003BGD     # selected direction, F/R   -> CTRL0A529001R
+CTRL0T529003BGM     # max duty                  -> CTRL0A529003050
+CTRL0T529003BGO     # mode I/C/L + source P/R/- -> CTRL0A529002CP
 CTRL0T529003BGF     # tacho fault, 1/0          -> CTRL0A5290011
 CTRL0T529003BGI     # integral gain, millionths -> CTRL0A529006002000
-CTRL0T529003BGA     # all: gain.required.measured RPM
+CTRL0T529003BGA     # all: gain.target.measured RPM
                     #                           -> CTRL0A529016002000.0150.0148
 
-# Sent by the board every TACHO_PUBLISH_PERIOD_MS, ONLY while liftB is moving
-# (on both links, 'U' so no ack):
-CTRL0U001008030.0350  # duty 30%, measured 350 RPM
+# Sent by the board on MQTT only, every STATUS_PUBLISH_PERIOD_MS while running
+# and once when the run ends ('U', so no ack):
+CTRL0U001015CF030.0350.1234  # Control, forward, duty 30%, 350 RPM, 1234 mA
 
 # Lift socket - liftB, over MQTT only (SerLink2: publish to hub/aa26/serlink/down).
 # Direction and distance only - distance in tachoB edges (2 per rev). The speed
-# is controllerB's: set it first with CTRL0 BR<dddd> (it can be changed
-# mid-move); it boots at CONTROLB_BOOT_RPM (100). A start with the required
-# speed at 0 is refused silently, so nothing moves.
+# is the target speed: set it first with CTRL0 BR<dddd> (it can be changed
+# mid-move); it boots at CONTROLB_BOOT_RPM (100). A start with the target at 0,
+# or while not Idle, is ignored silently, so nothing moves.
 CTRL0T516006BR0020  # speed for the moves that follow: 20 RPM
 LIFT0U645006BSF234  # start liftB forward for 234 edges (1..6 digits)
 LIFT0U645006BSR234  # start liftB reverse for 234 edges
 LIFT0U645006BG2000  # liftB down to the ground sensor (PB9), 2000 edges max
-LIFT0U645002BX      # stop liftB now (coasts)
+LIFT0U645002BX      # stop liftB now (coasts) - a Control run too
 LIFT0T645002BT      # liftB status -> LIFT0A645014M000120.000234
                     #   M moving / I idle / G idle on the ground sensor,
                     #   edges travelled, target
@@ -96,17 +96,16 @@ LIFT0U001015BG000180.002000   # liftB ground move found the ground after 180
 LIFT0U001015BI000000.000234   # ended short - with CTRL0 BGF reading 1, the
                               # tacho timeout stopped it
 
+# Remote hub - an Arduino UNO R4 over the radio (SerLink1), so nothing to
+# type here. It sends BTN01 (1P start/stop, 2P direction), POT01 (P050 - the
+# speed of a run it started) and HBT01 (H every 500 ms - a run it started stops
+# if they cease for 2 s). The hub sends it LED01: A0/A1/AF0002020 (Idle /
+# Control / Lift) and B0/B1 (forward / reverse selected).
+
 # Adc socket - ADC1, ranks IN0/IN3/IN4/IN5 (PA0/PA3/PA4/PA5). Channel 1 is the motorB current sense.
 ADC00T529002G1      # raw count, 4 digits
 ADC00T529002V1      # millivolts, 4 digits
 ADC00T529002GA      # all four channels, raw
-
-# Tacho socket - motorB speed in RPM. Transmit only, so there is nothing to
-# type. CURRENTLY OFF: the send in startControlBTask is commented out (the
-# CTRL0 status frame, and CTRL0 BGA, carry the measured RPM instead).
-# Uncommented, it would appear every TACHO_PUBLISH_PERIOD_MS as:
-TACHOU001011R0432.00017   # 432 RPM, 17 glitches rejected since boot.
-                          # 'U', so the board expects no ack back
 
 # SD card socket - SDC00, over SerLink0 (uart2). See the SD card block
 # below initTasks()'s globals for the wiring, and SdCard.hpp. One file
@@ -182,7 +181,6 @@ SDC00T563001C              # close -> C00
 #include "Frame.hpp"
 #include "Reader.hpp"
 #include "Transport.hpp"
-#include "SerlinkRelay.hpp"
 #include "uart2.h"
 #include "Button.hpp"
 #include "Led.hpp"
@@ -194,19 +192,18 @@ SDC00T563001C              # close -> C00
 #include "Controller.hpp"
 #include "Lift.hpp"
 #include "SdCard.hpp"
-#include "nRF24L01.hpp"
-#include "spi5.h"
 #include "Radio.hpp"
 #include "MqttPubSub.hpp"
 #include "SerLinkMqttAdapter.hpp"
+#include "HubApp.hpp"
 #include "lwip/netif.h"
 
 //--------------------------------------------------------------
 // Task stacks are 256 words (1 KB) except where noted. The exceptions:
 //
 // MQTT_TASK_STACK_SIZE - every task that calls into lwIP's MQTT client:
-// mqttTask, mqttRxTask, mqtt2Task, writer2Task and reader2Task (the last
-// two through SerLinkMqttAdapter::write()). MqttPubSub takes the tcpip
+// mqtt2Task, writer2Task and reader2Task (the last two through
+// SerLinkMqttAdapter::write()). MqttPubSub takes the tcpip
 // core lock and runs lwIP on the CALLER's stack, not the tcpip thread's,
 // so a publish drags the whole send path along with it: mqtt_publish ->
 // tcp_write -> tcp_output -> ip4_output -> etharp -> ethernet_output ->
@@ -250,22 +247,6 @@ const osThreadAttr_t ledTask_attributes = {
   .priority = (osPriority_t) osPriorityNormal,
 };
 
-/* Definitions for radioRxTask */
-osThreadId_t radioRxTaskHandle;
-const osThreadAttr_t radioRxTask_attributes = {
-  .name = "radioRxTask",
-  .stack_size = 256 * 4,
-  .priority = (osPriority_t) osPriorityNormal,
-};
-
-/* Definitions for radioTxTask */
-osThreadId_t radioTxTaskHandle;
-const osThreadAttr_t radioTxTask_attributes = {
-  .name = "radioTxTask",
-  .stack_size = 256 * 4,
-  .priority = (osPriority_t) osPriorityNormal,
-};
-
 /* Definitions for writer1Task */
 osThreadId_t writer1TaskHandle;
 const osThreadAttr_t writer1Task_attributes = {
@@ -298,30 +279,6 @@ const osThreadAttr_t radio1Task_attributes = {
   .priority = (osPriority_t) osPriorityNormal,
 };
 
-/* Definitions for mqttTask */
-osThreadId_t mqttTaskHandle;
-const osThreadAttr_t mqttTask_attributes = {
-  .name = "mqttTask",
-  .stack_size = MQTT_TASK_STACK_SIZE,
-  .priority = (osPriority_t) osPriorityNormal,
-};
-
-/* Definitions for mqttRxTask */
-osThreadId_t mqttRxTaskHandle;
-const osThreadAttr_t mqttRxTask_attributes = {
-  .name = "mqttRxTask",
-  .stack_size = MQTT_TASK_STACK_SIZE,
-  .priority = (osPriority_t) osPriorityNormal,
-};
-
-/* Definitions for relayTask */
-osThreadId_t relayTaskHandle;
-const osThreadAttr_t relayTask_attributes = {
-  .name = "relayTask",
-  .stack_size = 256 * 4,
-  .priority = (osPriority_t) osPriorityNormal,
-};
-
 /* Definitions for adcTask */
 // Supervision only - the sampling itself is timer, DMA and interrupt, so
 // this task just wakes twice a second to check it is still running.
@@ -343,9 +300,8 @@ const osThreadAttr_t motorTask_attributes = {
 };
 
 /* Definitions for controlBTask */
-// Drains the tachometer queue and recomputes speed every
-// CONTROLB_PERIOD_MS. Given more stack than the other small tasks because
-// this is where the motorB control loop will go.
+// Runs hubApp every CONTROLB_PERIOD_MS: the tachometer update, the mode
+// logic, liftB and controllerB, and the status and LED frames.
 osThreadId_t controlBTaskHandle;
 const osThreadAttr_t controlBTask_attributes = {
   .name = "controlB",
@@ -403,15 +359,10 @@ void startWriter0Task(void *argument);
 void startReader0Task(void *argument);
 void startSerLink0Task(void *argument);
 void StartLedTask(void *argument);
-void startRadioRxTask(void *argument);
-void startRadioTxTask(void *argument);
 void startWriter1Task(void *argument);
 void startReader1Task(void *argument);
 void startSerLink1Task(void *argument);
 void startRadio1Task(void *argument);
-void startMqttTask(void *argument);
-void startMqttRxTask(void *argument);
-void startRelayTask(void *argument);
 void startMotorTask(void *argument);
 void startAdcTask(void *argument);
 void startControlBTask(void *argument);
@@ -446,6 +397,12 @@ bool adcSockInstantHandler(SerLink::Frame &rxFrame, uint16_t* dataLen, char* dat
 void sdSockReceiveHandler(const char* data, uint16_t dataLen);
 bool sdSockInstantHandler(SerLink::Frame &rxFrame, uint16_t* dataLen, char* data);
 
+// The remote hub's sockets on SerLink1 (radio) - BTN01, POT01, HBT01,
+// documented above their implementations, below the LIFT0 socket's.
+void buttonSockReceiveHandler(const char* data, uint16_t dataLen);
+void potSockReceiveHandler(const char* data, uint16_t dataLen);
+void heartbeatSockReceiveHandler(const char* data, uint16_t dataLen);
+
 // This is called by transport0 when a frame is received.
 void transport0ReceiveCallback(const char* data, uint16_t dataLen){ 
     //ledOrange.flash(1, 1, 0, true);
@@ -473,8 +430,6 @@ QueueHandle_t transport0Queue;
 
 SerLink::Transport transport0(&writer0, &reader0);
 
-SerLink::Socket* ledSerialSocket = nullptr;
-
 //--------------------------------------------------------------
 // SerLink1 - the same stack again, over the nRF24L01 (radio1) instead of
 // uart2. writer1 and reader1 post serialised frames to radio1.eventQueue,
@@ -498,20 +453,28 @@ static_assert(RADIOMSG__FRAME_LEN_MAX >= SerLink::Frame::MAX_FRAME_LEN,
   "RADIOMSG__FRAME_LEN_MAX is too small for a serialised SerLink frame");
 
 //--------------------------------------------------------------
-// LED01 relay (ledRelay): ledSerialSocket (transport0, uart2) <-> ledRadioSocket
-// (transport1, radio1), in both directions - as the serlink_nrf24_brg sketch.
-// Relayed frames keep their roll code, e.g.
-//   PC -> LED01U492002A1          (uart2)
-//   radio -> LED01U492002A1
+// The remote hub (Arduino UNO R4, sketches/remote_hub in the
+// Arduino_uno_r4_gp repo) - all on transport1, the radio:
 //
-// For a 'T' frame, the far end's ack is returned as a relay ack ('B'), e.g.
-//   PC -> LED01T492002A1          (uart2)
-//   PC <- LED01A492900            (ack from reader0)
-//   radio -> LED01T492002A1
-//   radio <- LED01A492900         (ack from the far end)
-//   PC <- LED01B492900            (relay ack)
+//   BTN01  remote -> hub, 'T'   button events: 1P start/stop, 2P direction
+//   POT01  remote -> hub, 'U'   pot percent, P050; the speed of a remote run
+//   HBT01  remote -> hub, 'U'   H, every 500 ms
+//   LED01  hub -> remote, 'U'   the remote's LEDs - hubApp sends them
+//
+// Every frame from the remote is a sign of life to hubApp, which stops a
+// run the remote started once none has come for REMOTE_HEARTBEAT_TIMEOUT_MS.
+// The remote's frames carry 9 data characters at most (its UART_BUFF_LEN).
+#define REMOTE_HEARTBEAT_TIMEOUT_MS 2000U   // 4 missed heartbeats
+#define REMOTE_LED_REFRESH_MS       1000U   // the remote waits 3 s before
+                                            // showing the link as lost
+#define REMOTE_POT_RPM_MAX          300U    // the speed at pot 100%
+#define REMOTE_LED_RUN_ID           'A'     // off Idle, on Control, flash Lift
+#define REMOTE_LED_DIRECTION_ID     'B'     // on = reverse selected
+
 SerLink::Socket* ledRadioSocket = nullptr;
-SerLink::SerlinkRelay ledRelay;
+SerLink::Socket* buttonRadioSocket = nullptr;
+SerLink::Socket* potRadioSocket = nullptr;
+SerLink::Socket* heartbeatRadioSocket = nullptr;
 
 //--------------------------------------------------------------
 // Board LEDs (GPIOB)
@@ -606,35 +569,28 @@ SerLink::Socket* motorSocket = nullptr;
 
 Tachometer tachoB(TIM5, GPIOF, TACHOB_PIN);
 
-// Speed goes out unsolicited rather than being polled: nothing on the PC
-// has to ask for it, and a terminal left open shows the motor spinning up
-// and slowing down on its own. Sent as 'U' (no ack) because a telemetry
+// The CTRL0 status frame (speed, duty, current - see the CTRL0 notes)
+// goes out unsolicited while the motor runs, rather than being polled: the
+// PC's dashboard just listens. Sent as 'U' (no ack) because a telemetry
 // frame that went missing is better dropped than retried - the next one is
-// only TACHO_PUBLISH_PERIOD_MS away, and waiting on an ack would stall the
-// control loop.
-#define TACHO_PUBLISH_PERIOD_MS 500  // 2000
-#define TACHO_RPM_FIELD_WIDTH   4U
+// only STATUS_PUBLISH_PERIOD_MS away, and waiting on an ack would stall
+// the control loop.
+#define STATUS_PUBLISH_PERIOD_MS 500
 
-// Glitch count, after a '.' separator. getGlitchCount() is a uint16_t, so
-// five digits hold its whole range and no clamp is needed.
-#define TACHO_GLITCH_FIELD_WIDTH 5U
-
-// controlBTask publishes on a whole number of its own passes rather than
-// keeping a second timebase, so the two periods have to divide.
-static_assert((TACHO_PUBLISH_PERIOD_MS % CONTROLB_PERIOD_MS) == 0,
-  "TACHO_PUBLISH_PERIOD_MS must be a whole number of controlB periods");
-
-// Acquired on transport0 (uart2), alongside the motor and ADC sockets.
-SerLink::Socket* tachoSocket = nullptr;
+// hubApp publishes on a whole number of controlB passes rather than
+// keeping a second timebase, so the periods have to divide.
+static_assert((STATUS_PUBLISH_PERIOD_MS % CONTROLB_PERIOD_MS) == 0,
+  "STATUS_PUBLISH_PERIOD_MS must be a whole number of controlB periods");
+static_assert((REMOTE_LED_REFRESH_MS % CONTROLB_PERIOD_MS) == 0,
+  "REMOTE_LED_REFRESH_MS must be a whole number of controlB periods");
 
 //--------------------------------------------------------------
 // motorB speed controller, run by controlBTask - see Controller.hpp.
 //
-// Idle until the MOTOR socket's set speed command (<sel>S<dddd>) enables
-// it; a set percent command (<sel>P<ddd>) disables it again and puts the
-// motor back in open loop. While it is enabled it owns motorB's duty
-// cycle, and a percent written by anything else is overwritten on the
-// next pass.
+// Idle until hubApp starts a Control run or a lift move enables it, and
+// disabled again when the run ends. While it is enabled it owns motorB's
+// duty cycle, and a percent written by anything else is overwritten on
+// the next pass.
 //
 // CONTROLB_INTEGRAL_GAIN is duty cycle percent per RPM of error, per
 // pass. At 20 Hz, 0.002 moves the output 4%/s for a 100 RPM error. That
@@ -649,8 +605,8 @@ SerLink::Socket* tachoSocket = nullptr;
 // CONTROLB_OUTPUT_MAX_PERCENT caps the duty cycle the controller can
 // ever write. With a dead or unplugged tacho the reading is zero and the
 // law climbs straight to this limit, so it is also how hard the motor is
-// driven until the timeout below stops it. Raise it if a demand ever
-// needs more than 50% to reach.
+// driven until the timeout below stops it. It is the boot value: CTRL0
+// BM<ddd> changes it at run time (Controller::setOutputMaxPercent()).
 //
 // CONTROLB_TACHO_TIMEOUT_S: how long the tacho may read zero, with a
 // non-zero demand and the duty at or above CONTROLB_TACHO_CHECK_MIN_PERCENT,
@@ -672,10 +628,16 @@ SerLink::Socket* tachoSocket = nullptr;
 #define CONTROLB_TACHO_TIMEOUT_S    10U
 #define CONTROLB_TACHO_CHECK_MIN_PERCENT 20U
 
-// The required speed controllerB boots with, set in initTasks(). Setting
-// it does not enable the controller, so nothing moves at boot - it is the
-// speed a lift move runs at until CTRL0 BR<dddd> sets another.
+// The target speed hubApp boots with. Setting it does not enable the
+// controller, so nothing moves at boot - it is the speed a Control run or
+// a lift move runs at until CTRL0 BR<dddd> sets another.
 #define CONTROLB_BOOT_RPM           100U
+
+// motorB current: the PA3 sense voltage (adc1 channel 1, mV) times this
+// gives mA, for the CTRL0 status frame.
+// TODO: the real value, from the TC78H611FNG current sense / the board's
+// sense resistor. 1 reports the raw millivolts as mA until then.
+#define MOTORB_CURRENT_MA_PER_MV    1.0f
 
 // Controller has its own direction type so it does not depend on the
 // motor driver; these translate for the TC78H611FNG. Written out for
@@ -726,15 +688,16 @@ Controller controllerB(controllerBConfig);
 //--------------------------------------------------------------
 // liftB - moves by distance on top of controllerB. See Lift.hpp.
 //
-// liftB owns controllerB: controlBTask calls liftB.run(), which runs the
-// controller. Lift runs it whether or not a move is in progress, so the
-// CTRL0 socket still works while the lift is idle.
+// liftB owns controllerB: hubApp.run() calls liftB.run(), which runs the
+// controller. Lift runs it whether or not a move is in progress, so a
+// Control run (no lift move) is driven through it too.
 //
-// liftB is direction and distance only - the speed is controllerB's, set
-// through CTRL0 (BR<dddd>) before the move and changeable during it. A
-// start with a zero demand is refused. Mid-move, leave CTRL0's direction
-// alone and do not set the speed to zero - either can stall the move or
-// cut it short; stop the lift instead (LIFT0 BX). See Speed in Lift.hpp.
+// liftB is direction and distance only - the speed is controllerB's,
+// hubApp's target speed (CTRL0 BR<dddd>), changeable during the move. A
+// start with a zero demand is refused. hubApp refuses direction changes
+// while anything runs, so a move cannot be stalled that way; a target
+// of zero mid-move still would - stop the lift instead (LIFT0 BX). See
+// Speed in Lift.hpp.
 //
 // Distance is tachoB edges, PULSES_PER_REV (2) per revolution - see
 // Tachometer::getEdges() for why not revolutions.
@@ -757,40 +720,17 @@ Lift liftB(&controllerB, LIFTB_FORWARD_DIRECTION,
            []() -> bool { return HAL_GPIO_ReadPin(LIFTB_GROUND_PORT,
                             LIFTB_GROUND_PIN) == LIFTB_GROUND_ACTIVE; });
 
-// A lift command, parsed by liftSockReceiveHandler() in serLink2Task and
-// carried to controlBTask, which owns liftB. One queue item per command,
-// so a command's fields always arrive together - they cannot be mixed
-// with the next command's the way separate shared variables could.
-struct LiftCmd
-{
-  enum op_t : uint8_t { start, ground, stop };
-
-  Lift*           lift;
-  op_t            op;
-  Lift::direction dir;        // start only
-  uint32_t        distance;   // start, and ground's maximum
-};
-
-// Commands arriving within one CONTROLB_PERIOD_MS. A command sent with
-// the queue full is dropped - over a 'T' frame the ack has already gone,
-// so check with the status read.
-#define LIFT_CMD_QUEUE_LENGTH 4
-StaticQueue_t liftCmdStaticQueue;
-uint8_t liftCmdQueueStorageArea[LIFT_CMD_QUEUE_LENGTH * sizeof(LiftCmd)];
-QueueHandle_t liftCmdQueue;
-
 // Acquired on transport2 (SerLink2, MQTT) only.
 SerLink::Socket* liftMqttSocket = nullptr;
 
-// CTRL0 - speed demands for the controllers. The MOTOR socket keeps its
-// own speed set for now, but this is the one to use. Two sockets, one
-// per link, sharing the same handlers (see the CTRL0 section):
+// CTRL0 - the controller and Control runs. Two sockets, one per link,
+// sharing the same handlers (see the CTRL0 section):
 //
 //   controlSocket      transport0 - SerLink0, serial (uart2)
 //   controlMqttSocket  transport2 - SerLink2, MQTT (mqtt2)
 //
-// Both drive the same controllerB, so the last command from either link
-// wins. controlBTask sends its status frame on both.
+// Both post to the same hubApp, so the serial console counts as the PC.
+// The status frame goes out on controlMqttSocket only.
 SerLink::Socket* controlSocket = nullptr;
 SerLink::Socket* controlMqttSocket = nullptr;
 
@@ -826,8 +766,39 @@ extern TIM_HandleTypeDef htim2;   // main.c, the 320 Hz TRGO source
 
 Adc adc1(&hadc1, &htim2, ADC1_NUM_CHANNELS);
 
+#define ADC1_MOTORB_CURRENT_CHANNEL 1U   // PA3, see the table above
+
 // Acquired on transport0 (uart2), alongside the motor socket.
 SerLink::Socket* adcSocket = nullptr;
+
+//--------------------------------------------------------------
+// hubApp - the hub's mode (Idle / Control / Lift) and the arbiter of every
+// command that starts, stops or steers motorB. See HubApp.hpp. Owned by
+// controlBTask; the socket handlers only parse and post to it.
+static void sendLiftDone();   // the LIFT0 done frame, in the LIFT0 section
+
+static const HubAppConfig hubAppConfig =
+{
+  &controllerB,
+  &liftB,
+  []() -> uint16_t                                        // getCurrentMa
+  {
+    float ma = (float)adc1.getMillivolts(ADC1_MOTORB_CURRENT_CHANNEL) *
+               MOTORB_CURRENT_MA_PER_MV;
+    return (ma > 65535.0f) ? 65535U : (uint16_t)(ma + 0.5f);
+  },
+  sendLiftDone,
+  CONTROLB_BOOT_RPM,
+  REMOTE_POT_RPM_MAX,
+  CONTROLB_PERIOD_MS,
+  STATUS_PUBLISH_PERIOD_MS,
+  REMOTE_LED_REFRESH_MS,
+  REMOTE_HEARTBEAT_TIMEOUT_MS,
+  REMOTE_LED_RUN_ID,
+  REMOTE_LED_DIRECTION_ID
+};
+
+HubApp hubApp(hubAppConfig);
 
 //--------------------------------------------------------------
 // SD card - SDIO, 4 bit, through FatFs. See SdCard.hpp.
@@ -892,7 +863,7 @@ SdCard sdCard(&hsd, &SDFatFS, SDPath,
 
 // An SDC00 command, parsed by sdSockReceiveHandler() in serLink0Task and
 // carried to sdCardTask, which owns sdCard - the same arrangement as
-// LiftCmd. The path or text travels in the item, so it cannot be
+// hubApp's AppCmd. The path or text travels in the item, so it cannot be
 // overwritten by the next command before it is used.
 struct SdCmd
 {
@@ -929,80 +900,38 @@ QueueHandle_t sdCmdQueue;
 SerLink::Socket* sdSocket = nullptr;
 
 //--------------------------------------------------------------
-// nRF24L01 radio on SPI5. The driver owns CE (PF6) and CSN (PF10); spi5
-// itself handles only SCK/MISO/MOSI, so the bus stays free for other slaves.
-// These three must agree with the transmitter. The values below are the
-// Arduino RF24 library's own defaults, so a sketch that only calls begin(),
-// openWritingPipe() and stopListening() needs no changes:
-//
-//   channel    76        RF24 begin() default
-//   data rate  1 Mbps    RF24 begin() default  (radio.init() sets this)
-//   payload    32 bytes  RF24 default; with dynamic payloads off - also the
-//                        default - RF24 zero-pads every write() up to it
-//
-// If the sketch calls radio.setChannel(), setDataRate() or setPayloadSize(),
-// match it here. A mismatch on any of them means silence, not corruption.
-#define RADIO_CHANNEL     76   // 2476 MHz - above most WiFi traffic
-#define RADIO_PAYLOAD_LEN 32   // fixed width, both ends. 32 -> 64 hex chars,
-                               // which is exactly SerLink's Frame::MAX_DATALEN
-#define RADIO_SERLINK     1      // 1 = SerLink1 over radio1; 0 = the test task RADIO_TEST_TX picks
-#define RADIO_TEST_TX     1      // 1 = run startRadioTxTask, 0 = startRadioRxTask
-#define RADIO_MODE        nRF24L01::Mode::Interrupt   // radioRxTask: or nRF24L01::Mode::Polled
-#define RADIO_POLL_MS     10     // Mode::Polled: delay between FIFO drains
-#define RADIO_IRQ_TIMEOUT_MS 1000   // Mode::Interrupt: backstop wake if an nINT
-                                    // edge is ever missed
-#define RADIO_TX_PERIOD_MS   3000   // radioTxTask: one count packet per period
+// nRF24L01 radio (radio1, above) on SPI5. The driver owns CE (PF6) and CSN
+// (PF10); spi5 itself handles only SCK/MISO/MOSI. Channel 76, 1 Mbps and
+// 32 byte payloads are fixed in Components/Radio and must match the remote
+// hub - the Arduino RF24 library's own defaults. A mismatch on any of them
+// means silence, not corruption.
 #define RADIO1_DETECT_TIMEOUT_MS 500 // radio1Task: how long the boot-time detect
                                      // check waits for the module (Tpor is 100 ms)
 
-nRF24L01 radio(nRF24L01_CE_GPIO_Port,  nRF24L01_CE_Pin,
-               nRF24L01_SS_GPIO_Port,  nRF24L01_SS_Pin);
-
-// Acquired in initTasks() rather than inside startRadioRxTask(), so it is
-// guaranteed valid before startSerLink0Task() can start calling
-// transport0.run() against the socket table.
-SerLink::Socket* radioSocket = nullptr;
-
-static uint16_t bytesToHex(const uint8_t* src, uint8_t srcLen, char* dst);
-
-
-SerLink::Socket* mqttSocket = nullptr;
-
 //--------------------------------------------------------------
-// MQTT over lwIP. mqttTask keeps the connection up and publishes a count;
-// mqttRxTask handles messages arriving on MQTT_SUB_TOPIC.
+// MQTT over lwIP - the broker SerLink2 connects to.
 #define MQTT_BROKER_IP          "192.168.0.196"
 #define MQTT_BROKER_PORT        1883
-#define MQTT_CLIENT_ID          "stm32-controlhub"   // must be unique on the broker
-#define MQTT_TOPIC              "test/hello"         // published to
-#define MQTT_SUB_TOPIC          "test/stm32/cmd"     // subscribed to. Not MQTT_TOPIC,
-                                                     // or the board hears its own publishes
-#define MQTT_PUBLISH_PERIOD_MS  3000
 
 extern struct netif gnetif;   // lwip.c
-
-// The constructor only stores its arguments, so a global is safe here - the
-// lwIP client itself is allocated on the first connect().
-MqttPubSub mqtt(MQTT_BROKER_IP, MQTT_BROKER_PORT, MQTT_CLIENT_ID);
 
 //--------------------------------------------------------------
 // SerLink2 link layer - SerLink over MQTT, for the PC.
 //
-// mqtt2Client is a SECOND connection to the same broker, reserved for
-// SerLink and read by nothing but mqtt2. MqttPubSub has one rxQueue for
-// all of its subscriptions and receive() does not filter by topic, so two
-// tasks receiving on one client would steal each other's messages - which
-// is why this is a separate instance rather than another subscription on
-// mqtt. See the ownership note in SerLinkMqttAdapter.hpp.
+// mqtt2Client is the hub's connection to the broker, reserved for SerLink
+// and read by nothing but mqtt2. MqttPubSub has one rxQueue for all of its
+// subscriptions and receive() does not filter by topic, so if another
+// connection is ever wanted (for other topics) it must be a separate
+// MqttPubSub instance - two tasks receiving on one client would steal each
+// other's messages. See the ownership note in SerLinkMqttAdapter.hpp.
 //
-// MQTT2_CLIENT_ID must differ from MQTT_CLIENT_ID: a second connection
-// with the same id kicks the first one off, and the two would sit there
+// MQTT2_CLIENT_ID must be unique on the broker: a second connection with
+// the same id kicks the first one off, and the two would sit there
 // disconnecting each other in a loop.
 //
 // The topics are a pair, not one topic. A broker delivers to every
 // subscriber including the publisher, so a single topic would feed every
-// frame and every ack straight back into our own Reader - the same trap
-// the MQTT_SUB_TOPIC comment above warns about.
+// frame and every ack straight back into our own Reader.
 //
 //   down   PC -> controlHub    (subscribed to here)
 //   up     controlHub -> PC    (published here)
@@ -1010,7 +939,7 @@ MqttPubSub mqtt(MQTT_BROKER_IP, MQTT_BROKER_PORT, MQTT_CLIENT_ID);
 // The payload is the serialised frame exactly as it would appear on
 // uart2, so the strings at the top of this file can be pasted straight
 // into mosquitto_pub, and mosquitto_sub reads the link like a terminal.
-#define MQTT2_CLIENT_ID    "stm32-serlink"          // NOT MQTT_CLIENT_ID
+#define MQTT2_CLIENT_ID    "stm32-serlink"          // unique on the broker
 #define MQTT2_TOPIC_DOWN   "hub/aa26/serlink/down"  // subscribed to
 #define MQTT2_TOPIC_UP     "hub/aa26/serlink/up"    // published to
 
@@ -1028,10 +957,10 @@ SerLinkMqttAdapter mqtt2(&mqtt2Client, MQTT2_TOPIC_UP, MQTT2_TOPIC_DOWN);
 // Both call write() from their own tasks, which SerLinkMqttAdapter allows:
 // the publish takes lwIP's core lock itself. See SerLinkMqttAdapter.hpp.
 //
-// Sockets: DBG00 (link check, stack query) and CTRL0 (speed controller),
-// sharing their handlers with SerLink0 - a socket belongs to one
-// transport, a handler does not. So CTRL0 over MQTT and CTRL0 over uart2
-// drive the same controllerB, and the last command from either wins.
+// Sockets: DBG00 (link check, stack query), CTRL0 (controller and
+// Control runs) and LIFT0, DBG00 and CTRL0 sharing their handlers with
+// SerLink0 - a socket belongs to one transport, a handler does not. So
+// CTRL0 over MQTT and CTRL0 over uart2 post to the same hubApp.
 //
 // The whole stack is idle until mqtt2 connects: until then nothing
 // arrives on rxDataQueue, and write() refuses, so the CTRL0 status frame
@@ -1055,9 +984,6 @@ void initTasks()
   transport0Queue = xQueueCreateStatic(TRANSPORT0_QUEUE_LENGTH, sizeof(SerLink::FrameMsg),
     transport0QueueStorageArea, &transport0StaticQueue);
   transport0.init(transport0Queue, transport0ReceiveCallback, transport0AckCallback);
-
-  radioSocket = transport0.acquireSocket("RAD00");
-  ledSerialSocket = transport0.acquireSocket("LED01");
 
   // Motor drive. setPercent() is what brings the hardware up: PWM
   // configures its timer and GPIO on first use, so this is where PC6/PC7
@@ -1088,28 +1014,15 @@ void initTasks()
      the queue is still being built. */
   tachoB.init();
 
-  /* Transmit only: no receive callback and no instant handler, because
-     nothing is ever sent to this socket. Acquired here rather than from
-     controlBTask so the socket table is complete before the scheduler
-     starts. */
-  tachoSocket = transport0.acquireSocket("TACHO");
-
-  /* Only validates the config - the controller stays disabled until a
-     set speed command arrives. Before controlBTask exists, like tachoB. */
+  /* Only validates the config - the controller stays disabled until
+     hubApp starts a run. Before controlBTask exists, like tachoB. */
   controllerB.init();
 
-  /* A demand without enable(): the motor stays still, but a lift start
-     now has a speed to run at from boot (Lift::start() refuses a zero
-     demand). CTRL0 BR<dddd> replaces it. */
-  controllerB.setRequiredRpm(CONTROLB_BOOT_RPM);
-
-  /* Only validates - the lift is idle until a start command. Its command
-     queue is created here, with it, so both exist before controlBTask
-     can drain one or the LIFT0 socket (acquired below, with SerLink2)
-     can post to it. */
+  /* Only validates - the lift is idle until a start command. hubApp, which
+     owns both, is initialised at the end of initTasks(), once the sockets
+     it sends on exist - still before the scheduler starts, so before
+     controlBTask can run it or any handler can post to it. */
   liftB.init();
-  liftCmdQueue = xQueueCreateStatic(LIFT_CMD_QUEUE_LENGTH, sizeof(LiftCmd),
-    liftCmdQueueStorageArea, &liftCmdStaticQueue);
 
   controlBTaskHandle = osThreadNew(startControlBTask, NULL, &controlBTask_attributes);
 
@@ -1126,11 +1039,10 @@ void initTasks()
      reader/writer setup it depends on. Still before the scheduler
      starts, so no task can see the socket half-registered.
 
-     transport0 holds nine of the SERLINK_CONFIG__MAX_SOCKETS slots -
-     RAD00, LED01, MOTOR, CTRL0, ADC00, TACHO and SDC00 here, DBG00 and
-     MQTT0 later, from their own tasks. An acquire past the limit returns a
-     silent nullptr, which is why every socket pointer is checked before
-     use. */
+     transport0 holds five of the SERLINK_CONFIG__MAX_SOCKETS slots -
+     MOTOR, CTRL0, ADC00 and SDC00 here, DBG00 later, from serLink0Task.
+     An acquire past the limit returns a silent nullptr, which is why
+     every socket pointer is checked before use. */
   motorSocket = transport0.acquireSocket("MOTOR", motorSockReceiveHandler,
     motorSockInstantHandler);
 
@@ -1175,11 +1087,6 @@ void initTasks()
    /* creation of ledTask */
   ledTaskHandle = osThreadNew(StartLedTask, NULL, &ledTask_attributes);
 
-  /* creation of mqttTask and mqttRxTask */
-  // Creates mqtt.rxQueue, before mqttRxTask can block on it. Subscribing has
-  // to wait for lwIP, so that happens in mqttTask.
-  mqtt.init();
-
   /* The SerLink2 link layer. init() creates mqtt2's frame queue and
      mqtt2Client's rxQueue and touches no lwIP, so it belongs here; the
      connection itself cannot start until MX_LWIP_Init() has run, and so
@@ -1203,8 +1110,8 @@ void initTasks()
   controlMqttSocket = transport2.acquireSocket("CTRL0", controlSockReceiveHandler,
     controlSockInstantHandler);
 
-  /* Commands in serLink2Task, posted on to controlBTask; the status read
-     on the ack, from reader2Task. */
+  /* Commands in serLink2Task, posted on to hubApp; the status read on the
+     ack, from reader2Task. */
   liftMqttSocket = transport2.acquireSocket("LIFT0", liftSockReceiveHandler,
     liftSockInstantHandler);
 
@@ -1216,23 +1123,20 @@ void initTasks()
   reader2TaskHandle = osThreadNew(startReader2Task, NULL, &reader2Task_attributes);
   serLink2TaskHandle = osThreadNew(startSerLink2Task, NULL, &serLink2Task_attributes);
 
-  mqttTaskHandle = osThreadNew(startMqttTask, NULL, &mqttTask_attributes);
+  /* SerLink1, over radio1, to the remote hub. radio1Task is the nRF24L01's
+     only owner - the driver is not thread-safe.
 
-  mqttRxTaskHandle = osThreadNew(startMqttRxTask, NULL, &mqttRxTask_attributes);
-
-  // The nRF24L01 has one owner at a time - SerLink1 through radio1, or one of
-  // the raw test tasks - since the driver is not thread-safe. Select with
-  // RADIO_SERLINK and RADIO_TEST_TX.
-#if RADIO_SERLINK
+     The remote's sockets: its button, pot and heartbeat frames are parsed
+     in serLink1Task and passed on to hubApp; LED01 is send-only, from
+     hubApp in controlBTask. DBG00 is acquired later, from serLink1Task. */
   transport1Queue = xQueueCreateStatic(TRANSPORT1_QUEUE_LENGTH, sizeof(SerLink::FrameMsg),
     transport1QueueStorageArea, &transport1StaticQueue);
   transport1.init(transport1Queue);
 
-  // Registered before the scheduler starts, so the Transport tasks never see
-  // either LED01 socket unrelayed.
   ledRadioSocket = transport1.acquireSocket("LED01");
-  ledRelay.init();
-  ledRelay.registerPair(ledSerialSocket, ledRadioSocket);
+  buttonRadioSocket = transport1.acquireSocket("BTN01", buttonSockReceiveHandler);
+  potRadioSocket = transport1.acquireSocket("POT01", potSockReceiveHandler);
+  heartbeatRadioSocket = transport1.acquireSocket("HBT01", heartbeatSockReceiveHandler);
 
   // Before writer1/reader1: init() creates the queues they are handed.
   radio1.init((const uint8_t*)"00001");
@@ -1254,13 +1158,10 @@ void initTasks()
 
   radio1TaskHandle = osThreadNew(startRadio1Task, NULL, &radio1Task_attributes);
 
-  relayTaskHandle = osThreadNew(startRelayTask, NULL, &relayTask_attributes);
-
-#elif RADIO_TEST_TX
-  radioTxTaskHandle = osThreadNew(startRadioTxTask, NULL, &radioTxTask_attributes);
-#else
-  radioRxTaskHandle = osThreadNew(startRadioRxTask, NULL, &radioRxTask_attributes);
-#endif
+  /* Last, once every socket it sends on exists. Creates the queue the
+     socket handlers post to - before the scheduler starts, so before any
+     of them can run. Status on MQTT, LEDs on the radio. */
+  (void)hubApp.init(controlMqttSocket, ledRadioSocket);
 }
 
 void startWriter0Task(void *argument)
@@ -1301,15 +1202,6 @@ void startSerLink0Task(void *argument)
   /* USER CODE END startSerLink0Task */
 }
 
-// Owns ledRelay: all relaying happens here (see SerlinkRelay.hpp).
-void startRelayTask(void *argument)
-{
-  for(;;)
-  {
-    ledRelay.run();
-  }
-}
-
 //--------------------------------------------------------------
 // SerLink1: the same stack as SerLink0, carried by radio1 instead of uart2.
 void startWriter1Task(void *argument)
@@ -1340,7 +1232,7 @@ void startSerLink1Task(void *argument)
   }
 }
 
-// Owns the nRF24L01 while RADIO_SERLINK is set: all SPI to it happens here.
+// Owns the nRF24L01: all SPI to it happens here.
 //
 // The detect check first gives a definite answer on whether the module was
 // there at boot - radio1.run() on its own just retries INIT silently
@@ -1421,12 +1313,18 @@ void startMotorTask(void *argument)
 //   ACK_OK - the ack says the frame arrived, not that the motor moved:
 //
 //     MOTORT516005AP030    percent = 30%   (always 3 digits, zero padded)
-//                          - open loop: also disables the speed controller
+//                          - open loop. Idle only
 //     MOTORT516006AS0300   speed = 300 RPM (always 4 digits, zero padded)
-//                          - closed loop: enables the speed controller
-//     MOTORT523003ADF      direction = forward
-//     MOTORT523003ADR      direction = reverse
-//     MOTORT523003ADD      direction = disabled
+//                          - the same as CTRL0 BR0300 then BS: hubApp's
+//                          target speed, and a Control run from the PC
+//     MOTORT523003ADF      direction = forward    - Idle only
+//     MOTORT523003ADR      direction = reverse    - Idle only
+//     MOTORT523003ADD      direction = disabled   - Idle only
+//
+//   P and D drive the bridge directly, under hubApp's nose - a bring-up
+//   and debug path, so they are refused unless hubApp is Idle. hubApp
+//   does not see an open loop run they start: stop it with ADD (or
+//   AP000), not CTRL0 BX.
 //
 //   Reads. Handled by motorSockInstantHandler(), which piggybacks the
 //   answer onto the ack instead of sending a frame of its own:
@@ -1435,10 +1333,6 @@ void startMotorTask(void *argument)
 //     MOTORT529003AGF  ->  MOTORA5290041000   frequency, 4 digits (Hz)
 //     MOTORT529003AGD  ->  MOTORA529001F      direction, one of F/R/D
 //     MOTORT529003AGS  ->  MOTORA5290040300   required speed, 4 digits (RPM)
-//
-// The speed set only takes effect while there is a direction: with it
-// idle the controller holds (see startControlBTask). Set a direction as
-// well as a speed.
 //
 // <selector> is the TC78H611FNG bridge channel. Only channel B is wired
 // (IN1B/IN2B on J10 pins 10 and 8), so for now 'A' and 'B' both reach
@@ -1555,13 +1449,20 @@ void motorSockReceiveHandler(const char* data, uint16_t dataLen)
     return;
   }
 
+  /* The mode check for P and D. Read here, in serLink0Task, while hubApp
+     changes it in controlBTask - so a start landing in the same moment can
+     slip past. Acceptable on a debug path; everything that matters goes
+     through hubApp's queue. */
+  const bool idle = (hubApp.getMode() == HubApp::mode::idle);
+
   switch(data[1])
   {
-    case 'P':   // <sel>P<ddd> - set percent
+    case 'P':   // <sel>P<ddd> - set percent, Idle only
     {
       uint32_t percent;
 
-      if((dataLen == MOTOR_CMD_SET_PERCENT_LEN) &&
+      if(idle &&
+         (dataLen == MOTOR_CMD_SET_PERCENT_LEN) &&
          readUintField(&data[2], 3U, &percent))
       {
         /* A percent means open loop, so the controller lets go first.
@@ -1581,28 +1482,30 @@ void motorSockReceiveHandler(const char* data, uint16_t dataLen)
       break;
     }
 
-    case 'S':   // <sel>S<dddd> - set speed (RPM), closed loop
+    case 'S':   // <sel>S<dddd> - set speed (RPM): CTRL0 BR<dddd> + BS
     {
       uint32_t rpm;
-      Controller* controller = controllerForSelector(data[0]);
 
-      if((controller != nullptr) &&
-         (dataLen == MOTOR_CMD_SET_SPEED_LEN) &&
+      if((dataLen == MOTOR_CMD_SET_SPEED_LEN) &&
          readUintField(&data[2], MOTOR_RPM_FIELD_WIDTH, &rpm))
       {
-        /* Demand first, so the first pass after enabling already works
-           towards it. Four digits cannot exceed uint16_t. */
-        controller->setRequiredRpm((uint16_t)rpm);
-        controller->enable();
+        /* Target first, so the start already runs at it. Four digits
+           cannot exceed uint16_t. The start is ignored unless Idle. */
+        hubApp.setTargetRpm((uint16_t)rpm);
+
+        AppCmd cmd = {};
+        cmd.op = AppCmd::start;
+        (void)hubApp.post(cmd);
       }
       break;
     }
 
-    case 'D':   // <sel>D<F|R|D> - set direction
+    case 'D':   // <sel>D<F|R|D> - set direction, Idle only
     {
       TC78H611FNG::direction direction;
 
-      if((dataLen == MOTOR_CMD_DIRECTION_LEN) &&
+      if(idle &&
+         (dataLen == MOTOR_CMD_DIRECTION_LEN) &&
          motorDirectionFromChar(data[2], &direction))
       {
         motor->setDirection(direction);
@@ -1657,17 +1560,10 @@ bool motorSockInstantHandler(SerLink::Frame &rxFrame, uint16_t* dataLen, char* d
       *dataLen = 1U;
       return true;
 
-    case 'S':   // required speed in RPM, 4 digits - same format the set takes
-    {
-      Controller* controller = controllerForSelector(rxFrame.data[0]);
-      if(controller == nullptr)
-      {
-        return false;
-      }
-      writeUintField(controller->getRequiredRpm(), MOTOR_RPM_FIELD_WIDTH, data);
+    case 'S':   // hubApp's target speed in RPM, 4 digits - same format the set takes
+      writeUintField(hubApp.getTargetRpm(), MOTOR_RPM_FIELD_WIDTH, data);
       *dataLen = MOTOR_RPM_FIELD_WIDTH;
       return true;
-    }
 
     default:
       return false;
@@ -1675,63 +1571,70 @@ bool motorSockInstantHandler(SerLink::Frame &rxFrame, uint16_t* dataLen, char* d
 }
 
 //--------------------------------------------------------------
-// CTRL0 socket - speed controller commands over SerLink0 (uart2).
+// CTRL0 socket - the controller and Control runs, over SerLink2 (MQTT)
+// and SerLink0 (uart2). Both post to hubApp - see HubApp.hpp for the
+// modes and what each command may do in them.
 //
 // Frame data is <controller><command><args>:
 //
-//   Sets. Handled by controlSockReceiveHandler(), acked with a plain
-//   ACK_OK:
+//   Sets and commands. Handled by controlSockReceiveHandler(), acked with
+//   a plain ACK_OK - the ack says the frame arrived, not that it was
+//   accepted; read back to confirm:
 //
-//     CTRL0T516006BR0120   required speed = 120 RPM (always 4 digits,
-//                          zero padded) - also enables the controller,
-//                          so the motor goes closed loop
-//     CTRL0T523003BDF      direction = forward
-//     CTRL0T523003BDR      direction = reverse
-//     CTRL0T523003BDD      direction = disabled (idle - the motor coasts)
+//     CTRL0T516006BR0120   target speed = 120 RPM (always 4 digits, zero
+//                          padded). Does NOT start anything: it is the
+//                          speed of the next Control run or lift move,
+//                          and of the one in progress (bar a remote run,
+//                          whose speed is the remote's pot)
+//     CTRL0T523003BDF      selected direction = forward - Idle only
+//     CTRL0T523003BDR      selected direction = reverse - Idle only
+//     CTRL0T516005BM050    max duty = 50% (always 3 digits). From
+//                          CONTROLB_TACHO_CHECK_MIN_PERCENT to 100, else
+//                          ignored; applies at once, running or not.
+//                          CONTROLB_OUTPUT_MAX_PERCENT is the boot value
 //     CTRL0T516008BI002000 integral gain = 0.002 - six digits, in
 //                          millionths (000000..999999, so 0..0.999999).
-//                          Takes effect on the next pass, enabled or not;
+//                          Takes effect on the next pass, running or not;
 //                          the output carries on from where it is. Lasts
 //                          until reset - CONTROLB_INTEGRAL_GAIN is the
 //                          boot value
+//     CTRL0T523002BS       start a Control run (from the PC) in the
+//                          selected direction at the target speed. Idle only
+//     CTRL0T523002BX       stop - a Control run or a lift move, whoever
+//                          started it
 //
 //   Reads. Handled by controlSockInstantHandler(), answered on the ack:
 //
-//     CTRL0T529003BGR  ->  CTRL0A5290040120   required speed, 4 digits
-//     CTRL0T529003BGD  ->  CTRL0A529001F      direction, one of F/R/D
+//     CTRL0T529003BGR  ->  CTRL0A5290040120   target speed, 4 digits
+//     CTRL0T529003BGD  ->  CTRL0A529001F      selected direction, F or R
+//     CTRL0T529003BGM  ->  CTRL0A529003050    max duty, 3 digits
+//     CTRL0T529003BGO  ->  CTRL0A529002CP     mode I/C/L, then who started
+//                          the run: P PC, R remote, - Idle
 //     CTRL0T529003BGF  ->  CTRL0A5290011      tacho fault, 1 or 0 - 1 once
 //                          the controller has stopped the motor because
 //                          tachoB read zero for CONTROLB_TACHO_TIMEOUT_S
 //                          with the duty at or above
 //                          CONTROLB_TACHO_CHECK_MIN_PERCENT.
-//                          Cleared by the next speed set (BR<dddd>).
+//                          Cleared by the next start
 //     CTRL0T529003BGI  ->  CTRL0A529006002000  integral gain, millionths -
 //                          same format the set takes
 //     CTRL0T529003BGA  ->  CTRL0A529016002000.0150.0148
-//                          all at once: <gain>.<required>.<measured> -
-//                          integral gain (6 digits, millionths), required
+//                          all at once: <gain>.<target>.<measured> -
+//                          integral gain (6 digits, millionths), target
 //                          RPM (4) and measured RPM (4, clamped at 9999).
 //                          One read, so the three are from the same moment
 //
-//   Status. Sent unsolicited by controlBTask every
-//   TACHO_PUBLISH_PERIOD_MS while liftB is moving, as 'U' (no ack
-//   expected):
+//   Status. Sent unsolicited by hubApp on MQTT only, as 'U' (no ack
+//   expected), every STATUS_PUBLISH_PERIOD_MS while a Control run or a
+//   lift move is in progress, and once more when it ends:
 //
-//     CTRL0U001008030.0350   motorB duty 30%, tachoB 350 RPM
+//     CTRL0U001015CF030.0350.1234
 //
-//   Duty is 3 digits, RPM 4 (clamped at 9999). It carries no controller
-//   letter - it is always controllerB, the only one. Add one when
-//   controllerA exists.
-//
-// The controller only drives the motor while it has a direction - with
-// it idle the controller holds - so set a direction as well as a speed.
-// Either order works. The direction set does not enable the controller:
-// on its own it just starts the motor at whatever duty cycle it has.
-// Open loop (and so disabling the controller) is still the MOTOR
-// socket's percent set.
-//
-// The direction read reports the motor, so a direction set through the
-// MOTOR socket shows here too - see Direction in Controller.hpp.
+//     <I|C|L>   mode: Idle, Control, Lift
+//     <F|R>     direction - the run's, or the selected one while Idle
+//     <ddd>     motorB duty, percent
+//     <dddd>    tachoB speed, RPM, clamped at 9999
+//     <dddd>    motorB current, mA (MOTORB_CURRENT_MA_PER_MV), clamped
 //
 // <controller> is resolved by controllerForSelector(), so it follows the
 // MOTOR socket's selectors: only controllerB exists, and 'A' reaches it
@@ -1739,11 +1642,13 @@ bool motorSockInstantHandler(SerLink::Frame &rxFrame, uint16_t* dataLen, char* d
 
 #define CONTROL_CMD_MIN_LEN        2U   // <ctl><cmd>
 #define CONTROL_CMD_SET_RPM_LEN    6U   // <ctl>R<dddd>
-#define CONTROL_CMD_DIRECTION_LEN  3U   // <ctl>D<F|R|D>
+#define CONTROL_CMD_DIRECTION_LEN  3U   // <ctl>D<F|R>
 #define CONTROL_CMD_SET_GAIN_LEN   8U   // <ctl>I<dddddd>
-#define CONTROL_CMD_GET_LEN        3U   // <ctl>G<R|D|F|I|A>
+#define CONTROL_CMD_SET_DUTY_LEN   5U   // <ctl>M<ddd>
+#define CONTROL_CMD_RUN_LEN        2U   // <ctl>S and <ctl>X
+#define CONTROL_CMD_GET_LEN        3U   // <ctl>G<R|D|M|O|F|I|A>
 #define CONTROL_RPM_FIELD_WIDTH    4U
-#define CONTROL_PWM_FIELD_WIDTH    3U   // status frame duty cycle, 0..100
+#define CONTROL_DUTY_FIELD_WIDTH   3U   // max duty, 0..100
 
 // Integral gain on the wire: an integer number of millionths, so the
 // socket never has to parse or print a float. 1e-6 is far finer than any
@@ -1752,15 +1657,14 @@ bool motorSockInstantHandler(SerLink::Frame &rxFrame, uint16_t* dataLen, char* d
 #define CONTROL_GAIN_FIELD_MAX     999999U
 #define CONTROL_GAIN_SCALE         1000000.0f
 
-// Same letters as the MOTOR socket's direction commands, D for disabled
-// meaning idle.
+// The selected direction: F or R. There is no D here any more - a run
+// is ended with BX, and hubApp idles the direction itself.
 static bool controlDirectionFromChar(char value, ControllerDirection* direction)
 {
   switch(value)
   {
     case 'F': *direction = ControllerDirection::forward; return true;
     case 'R': *direction = ControllerDirection::reverse; return true;
-    case 'D': *direction = ControllerDirection::idle;    return true;
     default:  return false;
   }
 }
@@ -1788,8 +1692,13 @@ static void writeGainField(float gain, char* dst)
   writeUintField(micro, CONTROL_GAIN_FIELD_WIDTH, dst);
 }
 
-// The sets. Runs in serLink0Task after the ack has gone out, so a
-// malformed command is dropped silently - read it back to confirm.
+// The sets and commands. Runs in serLink0Task or serLink2Task, whichever
+// link the frame came in on, after the ack has gone out - so a malformed
+// command is dropped silently; read it back to confirm.
+//
+// The target speed, the gain and the max duty are written straight away
+// (each is safe from any task), so a read straight after the set sees
+// it. Anything that starts, stops or steers goes to hubApp's queue.
 void controlSockReceiveHandler(const char* data, uint16_t dataLen)
 {
   if(dataLen < CONTROL_CMD_MIN_LEN)
@@ -1803,33 +1712,45 @@ void controlSockReceiveHandler(const char* data, uint16_t dataLen)
     return;
   }
 
+  AppCmd cmd = {};
+
   switch(data[1])
   {
-    case 'R':   // <ctl>R<dddd> - set required speed, closed loop
+    case 'R':   // <ctl>R<dddd> - target speed
     {
       uint32_t rpm;
 
+      /* Four digits cannot exceed uint16_t. */
       if((dataLen == CONTROL_CMD_SET_RPM_LEN) &&
          readUintField(&data[2], CONTROL_RPM_FIELD_WIDTH, &rpm))
       {
-        /* Demand first, so the first pass after enabling already works
-           towards it. Four digits cannot exceed uint16_t. */
-        controller->setRequiredRpm((uint16_t)rpm);
-        controller->enable();
+        hubApp.setTargetRpm((uint16_t)rpm);
       }
-      break;
+      return;
     }
 
-    case 'D':   // <ctl>D<F|R|D> - set direction
-    {
-      ControllerDirection direction;
-
-      if((dataLen == CONTROL_CMD_DIRECTION_LEN) &&
-         controlDirectionFromChar(data[2], &direction))
+    case 'D':   // <ctl>D<F|R> - selected direction
+      if((dataLen != CONTROL_CMD_DIRECTION_LEN) ||
+         !controlDirectionFromChar(data[2], &cmd.dir))
       {
-        controller->setDirection(direction);
+        return;
       }
+      cmd.op = AppCmd::direction;
       break;
+
+    case 'M':   // <ctl>M<ddd> - max duty
+    {
+      uint32_t percent;
+
+      /* setOutputMaxPercent() refuses anything out of range, which here
+         can only be a value below the tacho check or above 100. */
+      if((dataLen == CONTROL_CMD_SET_DUTY_LEN) &&
+         readUintField(&data[2], CONTROL_DUTY_FIELD_WIDTH, &percent) &&
+         (percent <= 100U))
+      {
+        (void)controller->setOutputMaxPercent((uint8_t)percent);
+      }
+      return;
     }
 
     case 'I':   // <ctl>I<dddddd> - set integral gain, in millionths
@@ -1844,18 +1765,31 @@ void controlSockReceiveHandler(const char* data, uint16_t dataLen)
       {
         (void)controller->setIntegralGain((float)micro / CONTROL_GAIN_SCALE);
       }
-      break;
+      return;
     }
+
+    case 'S':   // <ctl>S - start a Control run
+      if(dataLen != CONTROL_CMD_RUN_LEN) { return; }
+      cmd.op = AppCmd::start;
+      break;
+
+    case 'X':   // <ctl>X - stop
+      if(dataLen != CONTROL_CMD_RUN_LEN) { return; }
+      cmd.op = AppCmd::stop;
+      break;
 
     case 'G':   // reads are answered on the ack, in controlSockInstantHandler()
     default:
-      break;
+      return;
   }
+
+  /* Never blocks - a full queue drops the command; read the mode back. */
+  (void)hubApp.post(cmd);
 }
 
-// The read. Runs in reader0Task, before the ack is sent. Returns false
-// for the set, leaving its ack a plain ACK_OK. Getter only, so no lock -
-// same reasoning as motorSockInstantHandler().
+// The reads. Runs in reader0Task or reader2Task, before the ack is sent.
+// Returns false for the sets, leaving their ack a plain ACK_OK. Getters
+// only, so no lock - same reasoning as motorSockInstantHandler().
 bool controlSockInstantHandler(SerLink::Frame &rxFrame, uint16_t* dataLen, char* data)
 {
   if((rxFrame.dataLen != CONTROL_CMD_GET_LEN) || (rxFrame.data[1] != 'G'))
@@ -1871,14 +1805,25 @@ bool controlSockInstantHandler(SerLink::Frame &rxFrame, uint16_t* dataLen, char*
 
   switch(rxFrame.data[2])
   {
-    case 'R':   // required speed in RPM, 4 digits - same format the set takes
-      writeUintField(controller->getRequiredRpm(), CONTROL_RPM_FIELD_WIDTH, data);
+    case 'R':   // target speed in RPM, 4 digits - same format the set takes
+      writeUintField(hubApp.getTargetRpm(), CONTROL_RPM_FIELD_WIDTH, data);
       *dataLen = CONTROL_RPM_FIELD_WIDTH;
       return true;
 
-    case 'D':   // direction, one of F/R/D - same letters the set takes
-      data[0] = controlDirectionToChar(controller->getDirection());
+    case 'D':   // selected direction, F or R - same letters the set takes
+      data[0] = controlDirectionToChar(hubApp.getSelectedDirection());
       *dataLen = 1U;
+      return true;
+
+    case 'M':   // max duty, 3 digits - same format the set takes
+      writeUintField(controller->getOutputMaxPercent(), CONTROL_DUTY_FIELD_WIDTH, data);
+      *dataLen = CONTROL_DUTY_FIELD_WIDTH;
+      return true;
+
+    case 'O':   // mode and run source, e.g. CP
+      data[0] = HubApp::modeToChar(hubApp.getMode());
+      data[1] = HubApp::sourceToChar(hubApp.getSource());
+      *dataLen = 2U;
       return true;
 
     case 'F':   // tacho fault, 1 or 0 - see Unresponsive tachometer in Controller.hpp
@@ -1891,12 +1836,12 @@ bool controlSockInstantHandler(SerLink::Frame &rxFrame, uint16_t* dataLen, char*
       *dataLen = CONTROL_GAIN_FIELD_WIDTH;
       return true;
 
-    case 'A':   // <gain>.<required>.<measured> - see the CTRL0 notes
+    case 'A':   // <gain>.<target>.<measured> - see the CTRL0 notes
     {
       /* writeUintField() keeps only the low digits, so clamp the measured
          speed to the field rather than report an unrelated number - a
-         faulty tacho can read up to 65535. The required speed was set
-         through a 4 digit field, so it always fits. */
+         faulty tacho can read up to 65535. The target was set through a
+         4 digit field, so it always fits. */
       uint32_t rpm = controller->getRpm();
       if(rpm > 9999U) { rpm = 9999U; }
 
@@ -1904,7 +1849,7 @@ bool controlSockInstantHandler(SerLink::Frame &rxFrame, uint16_t* dataLen, char*
       writeGainField(controller->getIntegralGain(), &data[len]);
       len += CONTROL_GAIN_FIELD_WIDTH;
       data[len++] = '.';
-      writeUintField(controller->getRequiredRpm(), CONTROL_RPM_FIELD_WIDTH, &data[len]);
+      writeUintField(hubApp.getTargetRpm(), CONTROL_RPM_FIELD_WIDTH, &data[len]);
       len += CONTROL_RPM_FIELD_WIDTH;
       data[len++] = '.';
       writeUintField(rpm, CONTROL_RPM_FIELD_WIDTH, &data[len]);
@@ -1925,9 +1870,9 @@ bool controlSockInstantHandler(SerLink::Frame &rxFrame, uint16_t* dataLen, char*
 // Frame data is <lift><command><args>:
 //
 //   Commands. Handled by liftSockReceiveHandler(), which runs in
-//   serLink2Task and only parses: the command goes on liftCmdQueue for
-//   controlBTask, which owns liftB. Send as 'U' or 'T' - a 'T' ack says
-//   the frame arrived, not that the lift moved:
+//   serLink2Task and only parses: the command is posted to hubApp, which
+//   owns liftB. Send as 'U' or 'T' - a 'T' ack says the frame arrived,
+//   not that the lift moved:
 //
 //     LIFT0U645006BSF234   start forward, 234 edges (1..6 digits)
 //     LIFT0U645006BSR234   start reverse, 234 edges
@@ -1936,12 +1881,14 @@ bool controlSockInstantHandler(SerLink::Frame &rxFrame, uint16_t* dataLen, char*
 //                          first (1..6 digits). Already on the ground,
 //                          it does not move, but still sends the done
 //                          message (travelled 0).
-//     LIFT0U645002BX       stop - the motor coasts
+//     LIFT0U645002BX       stop - the motor coasts. Stops a Control run
+//                          too, like CTRL0 BX
 //
-//   A start (S or G) while the lift is moving is ignored - stop it first.
-//   So is a distance of zero, and so is any start while controllerB's
-//   required speed is zero (it boots at CONTROLB_BOOT_RPM): the speed is
-//   set through CTRL0 (BR<dddd>), not here - see Speed in Lift.hpp.
+//   A start (S or G) is ignored unless hubApp is Idle - stop the lift or
+//   the Control run first. So is a distance of zero, and so is any start
+//   while the target speed is zero (it boots at CONTROLB_BOOT_RPM): the
+//   speed is set through CTRL0 (BR<dddd>), not here - see Speed in
+//   Lift.hpp.
 //
 //   Read. Handled by liftSockInstantHandler(), answered on the ack, so it
 //   must be sent as 'T':
@@ -1956,7 +1903,7 @@ bool controlSockInstantHandler(SerLink::Frame &rxFrame, uint16_t* dataLen, char*
 //
 //   Both clamped at 999999.
 //
-//   Done. Sent unsolicited by controlBTask on the pass a move ends -
+//   Done. Sent unsolicited by hubApp (sendLiftDone()) on the pass a move ends -
 //   distance reached, ground reached, stop command or tacho fault - with
 //   the lift's letter in front,
 //   since nothing asked:
@@ -1984,9 +1931,9 @@ bool controlSockInstantHandler(SerLink::Frame &rxFrame, uint16_t* dataLen, char*
 // The done message's frame type. 'U' (false) matches the CTRL0 status
 // frame: fire and forget, and over MQTT - TCP underneath - it is lost
 // only if the broker or the PC is not there. true sends it as 'T', and
-// writer2 then retries until the PC acks it; only worth it if the PC
-// side sends acks, or every done message costs writer2 its full retry
-// cycle and holds up the frames queued behind it.
+// writer2 then waits up to its ack timeout for the PC's ack (it does not
+// resend); only worth it if the PC side sends acks, or every done message
+// holds up the frames queued behind it for the whole timeout.
 #define LIFT_DONE_ACK            false
 
 // <M|I|G><travelled>.<target> into dst, LIFT_STATUS_LEN chars, no NUL -
@@ -2021,8 +1968,26 @@ static Lift* liftForSelector(char selector)
   }
 }
 
+// The done frame: <lift><M|I|G><travelled>.<target>, on the LIFT0 socket
+// the commands come in on. Called by hubApp, in controlBTask, when a move
+// ends. Non-blocking: sendData() only queues the frame for writer2, and
+// it is dropped if mqtt2 is not connected.
+static void sendLiftDone()
+{
+  if(liftMqttSocket == nullptr)
+  {
+    return;
+  }
+
+  char data[1U + LIFT_STATUS_LEN];
+  data[0] = 'B';   // liftB, the only lift
+  writeLiftStatus(liftB, &data[1]);
+  liftMqttSocket->sendData(data, (uint16_t)sizeof(data), LIFT_DONE_ACK);
+}
+
 // Runs in serLink2Task. Parses and posts; liftB itself is only touched
-// by controlBTask. Never blocks - a full queue drops the command.
+// by hubApp, in controlBTask. Never blocks - a full queue drops the
+// command.
 void liftSockReceiveHandler(const char* data, uint16_t dataLen)
 {
   if(dataLen < LIFT_CMD_MIN_LEN)
@@ -2030,12 +1995,14 @@ void liftSockReceiveHandler(const char* data, uint16_t dataLen)
     return;
   }
 
-  LiftCmd cmd = {};
-  cmd.lift = liftForSelector(data[0]);
-  if(cmd.lift == nullptr)
+  /* Only liftB exists, and hubApp drives it - the selector is checked,
+     not passed on. */
+  if(liftForSelector(data[0]) == nullptr)
   {
     return;
   }
+
+  AppCmd cmd = {};
 
   switch(data[1])
   {
@@ -2046,8 +2013,8 @@ void liftSockReceiveHandler(const char* data, uint16_t dataLen)
         return;
       }
 
-      if(data[2] == 'F')      { cmd.dir = Lift::direction::forward; }
-      else if(data[2] == 'R') { cmd.dir = Lift::direction::reverse; }
+      if(data[2] == 'F')      { cmd.liftDir = Lift::direction::forward; }
+      else if(data[2] == 'R') { cmd.liftDir = Lift::direction::reverse; }
       else                    { return; }
 
       if(!readUintField(&data[3], (uint8_t)(dataLen - 3U), &cmd.distance))
@@ -2055,7 +2022,7 @@ void liftSockReceiveHandler(const char* data, uint16_t dataLen)
         return;
       }
 
-      cmd.op = LiftCmd::start;
+      cmd.op = AppCmd::liftStart;
       break;
     }
 
@@ -2071,7 +2038,7 @@ void liftSockReceiveHandler(const char* data, uint16_t dataLen)
         return;
       }
 
-      cmd.op = LiftCmd::ground;
+      cmd.op = AppCmd::liftGround;
       break;
     }
 
@@ -2080,7 +2047,7 @@ void liftSockReceiveHandler(const char* data, uint16_t dataLen)
       {
         return;
       }
-      cmd.op = LiftCmd::stop;
+      cmd.op = AppCmd::stop;
       break;
 
     case 'T':   // status - answered on the ack, in liftSockInstantHandler()
@@ -2088,7 +2055,7 @@ void liftSockReceiveHandler(const char* data, uint16_t dataLen)
       return;
   }
 
-  (void)xQueueSend(liftCmdQueue, &cmd, 0U);
+  (void)hubApp.post(cmd);
 }
 
 // The status read. Runs in reader2Task, before the ack is sent. Getters
@@ -2112,6 +2079,67 @@ bool liftSockInstantHandler(SerLink::Frame &rxFrame, uint16_t* dataLen, char* da
 }
 
 //--------------------------------------------------------------
+// The remote hub's sockets - BTN01, POT01, HBT01 - over SerLink1 (radio).
+// See the remote hub block above initTasks() for what each carries, and
+// The remote in HubApp.hpp for what hubApp does with it.
+//
+// The frame data is the remote's own HardMod event format (Button.hpp,
+// pot.hpp in the Arduino repo):
+//
+//   BTN01T<rrr>0021P    button 1 pressed - start/stop
+//   BTN01T<rrr>0022P    button 2 pressed - toggle the direction (Idle only)
+//                       (L long press, R<ddd> release: ignored)
+//   POT01U<rrr>004P050  pot at 50% - the speed of a remote run
+//   HBT01U<rrr>001H     heartbeat
+//
+// All three run in serLink1Task. Every frame, of any of them, is a sign of
+// life; only button presses go through hubApp's queue - the pot and the
+// heartbeat are single values, so they are just written.
+
+#define REMOTE_BUTTON_LEN     2U   // <id><event>
+#define REMOTE_POT_LEN        4U   // <id><ddd>
+#define REMOTE_POT_WIDTH      3U
+
+void buttonSockReceiveHandler(const char* data, uint16_t dataLen)
+{
+  hubApp.remoteAlive();
+
+  if((dataLen != REMOTE_BUTTON_LEN) || (data[1] != 'P'))
+  {
+    return;   // only presses mean anything
+  }
+
+  AppCmd cmd = {};
+  switch(data[0])
+  {
+    case '1': cmd.op = AppCmd::remoteStartStop; break;
+    case '2': cmd.op = AppCmd::remoteDirection; break;
+    default:  return;
+  }
+
+  (void)hubApp.post(cmd);
+}
+
+void potSockReceiveHandler(const char* data, uint16_t dataLen)
+{
+  hubApp.remoteAlive();
+
+  uint32_t percent;
+  if((dataLen == REMOTE_POT_LEN) &&
+     readUintField(&data[1], REMOTE_POT_WIDTH, &percent))
+  {
+    hubApp.setPotPercent((percent > 100U) ? 100U : (uint8_t)percent);
+  }
+}
+
+void heartbeatSockReceiveHandler(const char* data, uint16_t dataLen)
+{
+  (void)data;
+  (void)dataLen;
+  hubApp.remoteAlive();
+}
+
+//--------------------------------------------------------------
 // Analog input supervision.
 //
 // Nothing here is in the sample path: TIM2 triggers the scans, the DMA
@@ -2127,151 +2155,29 @@ void startAdcTask(void *argument)
 }
 
 //--------------------------------------------------------------
-// controlB task - motorB closed loop, at CONTROLB_PERIOD_MS.
+// controlB task - motorB, at CONTROLB_PERIOD_MS.
 //
-// For now it only services the tachometer. tachoB.update() drains the
-// timestamps the EXTI4 ISR has queued since the last pass and turns the
-// complete revolutions among them into an RPM; it does not block, so the
-// period is set here with vTaskDelayUntil rather than inside the driver.
+// tachoB.update() drains the timestamps the EXTI4 ISR has queued since
+// the last pass and turns the complete revolutions among them into an
+// RPM; it does not block, so the period is set here with vTaskDelayUntil
+// rather than inside the driver. This is the one task allowed to call
+// update(). The getters are safe from anywhere - see the threading note
+// in Tachometer.hpp.
 //
-// This is the one task allowed to call update(). The getters are safe
-// from anywhere - see the threading note in Tachometer.hpp.
-//
-// liftB runs between the update and the delay - and runs controllerB -
-// so both always see the reading taken this pass. controllerB does
-// nothing until a lift start (or the MOTOR/CTRL0 socket) enables it.
+// hubApp.run() comes after the update, so the commands it applies, liftB
+// and controllerB (which it runs) and the status frame all see this
+// pass's reading. This is hubApp's owning task, and so liftB's and
+// controllerB's - see Threading in HubApp.hpp.
 void startControlBTask(void *argument)
 {
   TickType_t xLastWakeTime = xTaskGetTickCount();
   const TickType_t xFrequency = pdMS_TO_TICKS(CONTROLB_PERIOD_MS);
 
-  /* A whole number of loop passes - the static_assert above says so. */
-  const uint32_t publishEvery = TACHO_PUBLISH_PERIOD_MS / CONTROLB_PERIOD_MS;
-  uint32_t passes = 0U;
-
-  char speedData[1U + TACHO_RPM_FIELD_WIDTH + 1U + TACHO_GLITCH_FIELD_WIDTH];
-  char statusData[CONTROL_PWM_FIELD_WIDTH + 1U + CONTROL_RPM_FIELD_WIDTH];
-
-  /* liftB's status as of the end of the previous pass, so a move ending
-     shows as moving -> idle across liftB.run(). */
-  Lift::status liftBLastStatus = liftB.getStatus();
-  char liftDoneData[1U + LIFT_STATUS_LEN];   // <lift><status>
-
   for(;;)
   {
     tachoB.update();
 
-    /* Lift commands from the LIFT0 socket. After the update, so a start
-       measures from this pass's edge count; drained completely, so a
-       start and a stop sent together are both seen, in order. */
-    LiftCmd cmd;
-    bool liftBGroundAlready = false;
-    while(xQueueReceive(liftCmdQueue, &cmd, 0U) == pdTRUE)
-    {
-      if(cmd.op == LiftCmd::start)
-      {
-        (void)cmd.lift->start(cmd.dir, cmd.distance);   // refused if moving
-      }
-      else if(cmd.op == LiftCmd::ground)
-      {
-        /* Accepted but still idle: already on the ground, so it never
-           moved. The PC still waits for a done message - send one below. */
-        if(cmd.lift->toGroundLevel(cmd.distance) &&
-           (cmd.lift->getStatus() == Lift::status::idle))
-        {
-          liftBGroundAlready = true;
-        }
-      }
-      else
-      {
-        cmd.lift->stop();
-      }
-    }
-
-    /* Ends the move if its distance is up, then runs controllerB - or
-       holds it while the direction is idle. See Lift::run(). */
-    liftB.run();
-
-    /* A move has ended since the last pass - distance or ground reached
-       in run(), or a stop command above - or a ground move found the
-       lift already there. Tell the PC over the socket the start came in
-       on. Non-blocking: sendData() only queues the frame for writer2,
-       and it is dropped if mqtt2 is not connected. */
-    Lift::status liftBStatus = liftB.getStatus();
-    if((((liftBLastStatus == Lift::status::moving) &&
-         (liftBStatus == Lift::status::idle)) || liftBGroundAlready) &&
-       (liftMqttSocket != nullptr))
-    {
-      liftDoneData[0] = 'B';
-      writeLiftStatus(liftB, &liftDoneData[1]);
-      liftMqttSocket->sendData(liftDoneData, (uint16_t)sizeof(liftDoneData),
-        LIFT_DONE_ACK);
-    }
-    liftBLastStatus = liftBStatus;
-
-    if(++passes >= publishEvery)
-    {
-      passes = 0U;
-
-      /* writeUintField() writes the low digits of whatever it is given,
-         so a value wider than the field would be silently mangled -
-         getRpm() saturates at 65535, which is five digits. Clamp to the
-         field instead, so an implausible reading shows as 9999 rather
-         than as some unrelated number. Both fields below are 4 wide. */
-      static_assert(TACHO_RPM_FIELD_WIDTH == CONTROL_RPM_FIELD_WIDTH,
-        "rpmField is clamped for both sockets");
-      uint32_t rpmField = tachoB.getRpm();
-      if(rpmField > 9999U)
-      {
-        rpmField = 9999U;
-      }
-
-      /* <ppp>.<rrrr> - see the CTRL0 status frame. The duty cycle is the
-         motor's actual one, so it is right in open loop as well.
-         setPercent() clamps at 100, so three digits always fit. */
-      writeUintField(controllerB.getPwmPercent(), CONTROL_PWM_FIELD_WIDTH,
-        &statusData[0]);
-      statusData[CONTROL_PWM_FIELD_WIDTH] = '.';
-      writeUintField(rpmField, CONTROL_RPM_FIELD_WIDTH,
-        &statusData[CONTROL_PWM_FIELD_WIDTH + 1U]);
-
-      /* 'U': fire and forget, same reasoning as TACHO. Sent on both
-         links, uart2 and MQTT - over MQTT it is simply dropped while
-         mqtt2 is not connected.
-
-         Only while liftB is moving, so an idle board keeps the console
-         quiet. liftBStatus is this pass's, taken after liftB.run(), so
-         the pass a move ends sends the LIFT0 done frame above instead.
-         A closed loop run started from CTRL0 or MOTOR, with no lift
-         move, is not reported - read it with CTRL0T529003BGR. */
-      if(liftBStatus == Lift::status::moving)
-      {
-        if(controlSocket != nullptr)
-        {
-          controlSocket->sendData(statusData, (uint16_t)sizeof(statusData), false);
-        }
-        if(controlMqttSocket != nullptr)
-        {
-          controlMqttSocket->sendData(statusData, (uint16_t)sizeof(statusData), false);
-        }
-      }
-
-      if(tachoSocket != nullptr)
-      {
-        speedData[0] = 'R';
-        writeUintField(rpmField, TACHO_RPM_FIELD_WIDTH, &speedData[1]);
-
-        /* Edges rejected by the ISR's filters since init() - see
-           Tachometer::onEdge(). Climbing with duty cycle means PWM noise
-           is reaching PF4. */
-        speedData[1U + TACHO_RPM_FIELD_WIDTH] = '.';
-        writeUintField(tachoB.getGlitchCount(), TACHO_GLITCH_FIELD_WIDTH,
-          &speedData[2U + TACHO_RPM_FIELD_WIDTH]);
-
-        /* Non-blocking, and fire and forget. */
-        //tachoSocket->sendData(speedData, (uint16_t)sizeof(speedData), false);
-      }
-    }
+    hubApp.run();
 
     vTaskDelayUntil(&xLastWakeTime, xFrequency);
   }
@@ -2786,58 +2692,15 @@ bool adcSockInstantHandler(SerLink::Frame &rxFrame, uint16_t* dataLen, char* dat
 }
 
 //--------------------------------------------------------------
-// MQTT publish
-//
-// Every MQTT_PUBLISH_PERIOD_MS publishes "msg stm32: <n>" to MQTT_TOPIC, n
-// counting up from 0. While not connected it retries the connection once per
-// period instead, so the broker can start after the board, or restart.
-void startMqttTask(void *argument)
-{
-  uint32_t count = 0;
-  char     msg[32];
-
-  /* initTasks() runs before StartDefaultTask() calls MX_LWIP_Init(), which
-     creates the tcpip core lock every MqttPubSub method (bar receive()) takes.
-     The netif is only brought up after that, so it is the signal that lwIP
-     is ready. Waiting for the link as well saves a connect that could only
-     time out. */
-  while(!netif_is_up(&gnetif) || !netif_is_link_up(&gnetif))
-  {
-    osDelay(500);
-  }
-
-  // Only recorded here. Sent once the broker accepts the connection, and
-  // again after every reconnect.
-  mqtt.subscribe(MQTT_SUB_TOPIC);
-
-  for(;;)
-  {
-    if(mqtt.isConnected())
-    {
-      int msgLen = snprintf(msg, sizeof(msg), "msg stm32: %lu", (unsigned long)count);
-
-      mqtt.publish(MQTT_TOPIC, msg, (uint16_t)msgLen);
-      count++;
-    }
-    else
-    {
-      // Returns false, harmlessly, while an earlier attempt is still pending
-      mqtt.connect();
-    }
-
-    osDelay(MQTT_PUBLISH_PERIOD_MS);
-  }
-}
-
-//--------------------------------------------------------------
 // Owns mqtt2: the only caller of its receive path, and the task that keeps
 // the connection up. See SerLinkMqttAdapter.hpp for why the transmit side
 // is not here - write() publishes directly from the caller's task.
 void startMqtt2Task(void *argument)
 {
-  /* Same wait as startMqttTask. initTasks() ran before MX_LWIP_Init(),
-     which is what creates the tcpip core lock that start() reaches
-     through, and the netif coming up is the signal that it exists. */
+  /* initTasks() ran before MX_LWIP_Init(), which is what creates the
+     tcpip core lock that start() reaches through, and the netif coming up
+     is the signal that it exists. Waiting for the link as well saves a
+     connect that could only time out. */
   while(!netif_is_up(&gnetif) || !netif_is_link_up(&gnetif))
   {
     osDelay(500);
@@ -2878,192 +2741,6 @@ void startSerLink2Task(void *argument)
   }
 }
 
-//--------------------------------------------------------------
-// MQTT receive
-//
-// Handles each message arriving on MQTT_SUB_TOPIC. For now it just echoes
-// the payload to MQTT_TOPIC as "stm32 rx: <payload>", so a message published
-// to test/stm32/cmd from another machine shows up on the existing test/hello
-// subscriber. Replace with real command handling.
-void startMqttRxTask(void *argument)
-{
-  MqttPubSub::Message rxMsg;
-  char reply[16 + MqttPubSub::MAX_PAYLOAD_LEN];
-
-  mqttSocket = transport0.acquireSocket("MQTT0", nullptr, nullptr);  // for debugging
-
-  for(;;)
-  {
-    /* Blocks until a message arrives. Safe before lwIP is up: rxQueue exists
-       from mqtt.init(), and nothing can be posted to it until then anyway -
-       which also means lwIP is up by the time publish() below runs. */
-    if(mqtt.receive(rxMsg))
-    {
-      // int replyLen = snprintf(reply, sizeof(reply), "stm32 rx: %s", rxMsg.payload);
-
-      // mqtt.publish(MQTT_TOPIC, reply, (uint16_t)replyLen);
-
-      if(mqttSocket != nullptr)
-      {
-        mqttSocket->sendData(rxMsg.payload, rxMsg.payloadLen, false);
-      }
-    }
-  }
-}
-
-
-//--------------------------------------------------------------
-// Radio receive
-//
-// Receives from the nRF24L01 and forwards each packet to the "RAD00"
-// SerLink socket, hex encoded. On a terminal a 32-byte packet arrives as:
-//
-//   RAD00U001064<64 hex chars>
-//   \____/|\_/\_/
-//     |   | |   `- dataLen, 64
-//     |   | `----- rollcode
-//     |   `------- type U (unidirectional - no ack requested)
-//     `----------- protocol
-//
-// RADIO_MODE selects how the task learns a packet has landed: blocking on
-// the nINT interrupt (HAL_GPIO_EXTI_Callback() below), or polling every
-// RADIO_POLL_MS. Either way each wake drains the whole RX FIFO.
-void startRadioRxTask(void *argument)
-{
-  /* Must be byte-for-byte the array the transmitter passes to
-     RF24::openWritingPipe(). Both libraries clock address[0] out first, so
-     matching the array order is what matters - there is no reversal to
-     undo at this end.
-
-     This is the Arduino's  const byte RADIO_ADDRESS[6] = "00001";  minus
-     the string literal's trailing NUL, which RF24 ignores: the address is
-     five bytes wide, and the [6] is only there to hold the terminator. */
-  static const uint8_t radioRxAddress[nRF24L01::ADDRESS_LEN] =
-    { '0', '0', '0', '0', '1' };
-
-  uint8_t payload[RADIO_PAYLOAD_LEN];
-  char    hex[SerLink::Frame::MAX_DATALEN];
-
-  /* Retry rather than give up: init() only fails when the device is not
-     answering on SPI, which on a plug-in module is usually a wiring or
-     power fault that can be fixed without resetting the board. */
-  while(!radio.init(RADIO_MODE))
-  {
-    osDelay(1000);
-  }
-
-  radio.setChannel(RADIO_CHANNEL);
-  radio.setPayloadLen(RADIO_PAYLOAD_LEN);
-  radio.openReadingPipe(1, radioRxAddress);
-  radio.startListening();
-
-  for(;;)
-  {
-    /* Interrupt mode wakes on an nINT falling edge, or after
-       RADIO_IRQ_TIMEOUT_MS as a backstop in case an edge is ever missed.
-       waitForData() returns immediately in polled mode, so that path needs
-       its own delay or this loop would never yield. */
-    if(RADIO_MODE == nRF24L01::Mode::Interrupt)
-    {
-      radio.waitForData(RADIO_IRQ_TIMEOUT_MS);
-    }
-    else
-    {
-      osDelay(RADIO_POLL_MS);
-    }
-
-    /* Drain the FIFO, don't read just one. nINT is edge-triggered and read()
-       clears RX_DR, so a packet that lands while RX_DR is already set gets no
-       edge of its own: read one per wake and it sits in the FIFO until the
-       next packet arrives, leaving the task permanently behind. Each read()
-       checks RX_EMPTY after the previous iteration cleared RX_DR, so anything
-       arriving mid-loop is picked up here. Bounded in practice by the FIFO
-       depth of three. */
-    uint8_t len;
-    while((len = radio.read(payload, RADIO_PAYLOAD_LEN)) > 0)   // 0 = FIFO empty
-    {
-      if(radioSocket != nullptr)
-      {
-        /* Hex, not raw. SerLink frames are newline-terminated text and
-           Frame::setData() copies with strncpy(), so a 0x00 anywhere in the
-           payload would truncate the frame and a '\n' would split it.
-           32 bytes -> 64 chars, exactly Frame::MAX_DATALEN. */
-        //uint16_t hexLen = bytesToHex(payload, len, hex);
-
-        uint8_t textLen = (uint8_t)strnlen((const char*)payload, len);
-
-        radioSocket->sendData((char*) payload, textLen, false);
-
-        /* ack=false: a radio packet is a notification, and blocking the
-           drain loop on a round trip would drop the next packet. */
-        //radioSocket->sendData(hex, hexLen, false);
-      }
-    }
-  }
-}
-
-//--------------------------------------------------------------
-// Radio transmit
-//
-// Every RADIO_TX_PERIOD_MS sends "stm cnt: <n>", n counting up from 0. The
-// count advances on every attempt, acked or not, so gaps in the sequence at
-// the far end show lost packets.
-//
-// The far end must be listening on radioTxAddress: for an Arduino RF24
-// sketch,  radio.openReadingPipe(1, "00002")  then  radio.startListening().
-// Auto-ack is on, so a write() that nobody acks runs to MAX_RT (~28 ms) and
-// returns false.
-void startRadioTxTask(void *argument)
-{
-  /* Same byte order as radioRxAddress: address[0] goes out first, matching
-     the array the Arduino passes to openReadingPipe(). */
-  static const uint8_t radioTxAddress[nRF24L01::ADDRESS_LEN] =
-    { '0', '0', '0', '0', '1' };
-
-  uint32_t count = 0;
-  char     msg[nRF24L01::MAX_PAYLOAD_LEN];
-
-  /* Polled whatever RADIO_MODE says: write() learns how each transmission
-     ended by polling STATUS, so nINT would have nothing to wake. */
-  while(!radio.init(nRF24L01::Mode::Polled))
-  {
-    osDelay(1000);
-  }
-
-  radio.setChannel(RADIO_CHANNEL);
-  radio.setPayloadLen(RADIO_PAYLOAD_LEN);   // before openWritingPipe(), which sizes pipe 0 from it
-
-  /* Once is enough. init() leaves the radio in TX standby and nothing here
-     calls startListening(), which is what would close pipe 0 and stop
-     write() hearing the auto-ack. */
-  radio.openWritingPipe(radioTxAddress);
-
-  for(;;)
-  {
-    // write() zero-pads to the payload width, so the NUL goes out too.
-    int msgLen = snprintf(msg, sizeof(msg), "stm cnt: %lu", (unsigned long)count);
-
-    radio.write((const uint8_t*)msg, (uint8_t)msgLen);
-    count++;
-
-    osDelay(RADIO_TX_PERIOD_MS);
-  }
-}
-
-static uint16_t bytesToHex(const uint8_t* src, uint8_t srcLen, char* dst)
-{
-  static const char digits[] = "0123456789ABCDEF";
-  uint16_t written = 0;
-
-  for(uint8_t i = 0; i < srcLen; i++)
-  {
-    dst[written++] = digits[(src[i] >> 4) & 0x0F];
-    dst[written++] = digits[ src[i]       & 0x0F];
-  }
-
-  return written;   // not NUL terminated - callers pass the length explicitly
-}
-
 /* EXTI9_5 fires for the nRF24L01 nINT line (PF5, falling edge). CubeMX
    generates the vector and enables it at priority 7, which is numerically
    at or below configLIBRARY_MAX_SYSCALL_INTERRUPT_PRIORITY, so the
@@ -3076,17 +2753,11 @@ static uint16_t bytesToHex(const uint8_t* src, uint8_t srcLen, char* dst)
 
    extern "C" is mandatory: without it this compiles to a mangled symbol,
    HAL's __weak definition stays live, and the callback silently never
-   fires. See the worked example at the bottom of app_main.cpp.
-
-   Both owners are called. Each onIrq() returns immediately unless its own
-   object has been initialised, and RADIO_SERLINK makes sure only one ever
-   is. The test driver's onIrq() also does nothing in polled mode, where
-   nINT is masked off anyway. */
+   fires. See the worked example at the bottom of app_main.cpp. */
 extern "C" void HAL_GPIO_EXTI_Callback(uint16_t GPIO_Pin)
 {
   if(GPIO_Pin == nRF24L01_nINT_Pin)
   {
-    radio.onIrq();
     radio1.onIrq();
   }
   else if(GPIO_Pin == TACHOB_PIN)
@@ -3175,7 +2846,7 @@ extern "C" void vApplicationStackOverflowHook(TaskHandle_t xTask, char* pcTaskNa
 //                                                  lowest free space, in
 //                                                  bytes (4 digits)
 //   DBG00T349003S99  ->  DBG00A349003END           index past the last task
-//   DBG00T349002SL   ->  DBG00A349015mqttRxTask:0096   the task with the
+//   DBG00T349002SL   ->  DBG00A349014mqtt2Task:0096    the task with the
 //                                                  least free, same format
 //   DBG00T349001M    ->  DBG00A349021C.0012.0340.0000.0000
 //                        SerLink2's MQTT link (mqtt2): C connected / D not,

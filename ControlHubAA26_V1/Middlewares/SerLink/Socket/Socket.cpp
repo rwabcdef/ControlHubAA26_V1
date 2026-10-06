@@ -24,8 +24,8 @@ void Socket::init(char* protocol, Transport* transport, onReceiveCallback receiv
 
   /* The protocol last: a non-empty protocol is what makes the socket
      visible to Transport::findSocket(), and the Reader task may be
-     searching while a socket is acquired from another task (DBG00 and
-     MQTT0 still are). Filled in first, the handler is already there by
+     searching while a socket is acquired from another task (DBG00 still
+     is). Filled in first, the handler is already there by
      the time the socket can be found. */
   strncpy(this->protocol, protocol, Frame::LEN_PROTOCOL);
 

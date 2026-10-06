@@ -10,7 +10,8 @@
 #include "task.h"
 
 Controller::Controller(const ControllerConfig& config)
-: config(config), requiredRpm(0U), integralGain(config.integralGain), enabled(false), rejectedCount(0U),
+: config(config), requiredRpm(0U), integralGain(config.integralGain),
+  outputMaxPercent(config.outputMaxPercent), enabled(false), rejectedCount(0U),
   tachoFault(false), driving(false), valid(false), output(0.0f),
   zeroRpmPasses(0U), zeroRpmLimitPasses(0U)
 {
@@ -155,6 +156,23 @@ float Controller::getIntegralGain() const
   return integralGain;
 }
 
+bool Controller::setOutputMaxPercent(uint8_t percent)
+{
+  if((percent > 100U) || (percent < config.outputMinPercent) ||
+     (percent < config.tachoCheckMinPercent))
+  {
+    return false;
+  }
+
+  outputMaxPercent = percent;
+  return true;
+}
+
+uint8_t Controller::getOutputMaxPercent() const
+{
+  return outputMaxPercent;
+}
+
 void Controller::enable()
 {
   enabled = true;
@@ -263,6 +281,8 @@ void Controller::onReset()
 float Controller::clamp(float value) const
 {
   if(value < (float)config.outputMinPercent) { return (float)config.outputMinPercent; }
-  if(value > (float)config.outputMaxPercent) { return (float)config.outputMaxPercent; }
+  /* Read once: setOutputMaxPercent() may change it between two reads. */
+  const float maxPercent = (float)outputMaxPercent;
+  if(value > maxPercent) { return maxPercent; }
   return value;
 }

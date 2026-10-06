@@ -1,72 +1,109 @@
-ControlHubAA26_V1 - SerLink socket summary
-(source: ControlHubAA26_V1/Core/Src/main_tasks.cpp)
+ControlHubAA26 - SerLink socket summary and protocol contract
+(sources: ControlHubAA26_V1/Core/Src/main_tasks.cpp, Core/Inc/HubApp.hpp)
 
-Transports:
-  transport0 = SerLink0, uart2 (USART2, FTDI cable)
-  transport1 = SerLink1, nRF24L01 radio (only when RADIO_SERLINK = 1, the current setting)
-  transport2 = SerLink2, MQTT (hub/aa26/serlink/down, hub/aa26/serlink/up)
+This file is the contract between the three projects:
+  hub firmware   this repo
+  remote hub     C:\Users\rwabc\Software\Embedded\Arduino\Arduino_uno_r4_gp  (sketches/remote_hub)
+  desktop app    C:\Users\rwabc\Documents\Projects\Embedded\ControlHubAA26\Desktop_App\v1
+A change to any frame below has to be made at both ends.
 
-Socket  Interface 1  Interface 2   Receive callback           Instant handler
-------  -----------  ------------  -------------------------  -------------------------
-DBG00   uart2        MQTT, radio   -                          debugSockInstantHandler
-LED01   uart2        radio         - (relayed)                -
-MOTOR   uart2        -             motorSockReceiveHandler    motorSockInstantHandler
-CTRL0   uart2        MQTT          controlSockReceiveHandler  controlSockInstantHandler
-LIFT0   MQTT         -             liftSockReceiveHandler     liftSockInstantHandler
-ADC00   uart2        -             -                          adcSockInstantHandler
-TACHO   uart2        -             -                          -
-SDC00   uart2        -             sdSockReceiveHandler       sdSockInstantHandler
-MQTT0   uart2        -             -                          -
-RAD00   uart2        -             -                          -
+Transports (on the hub):
+  transport0 = SerLink0, uart2 (USART2, FTDI cable)             - serial console / debug
+  transport1 = SerLink1, nRF24L01 radio                          - the remote hub
+  transport2 = SerLink2, MQTT (down: hub/aa26/serlink/down,
+                               up:   hub/aa26/serlink/up)        - the desktop app
 
-Comments
---------
-DBG00  Separate sockets on each transport, all using the same handler.
-       R2 -> "OK"; Snn / SL -> task stack levels; M -> MQTT link stats.
-       transport0: acquired in serLink0Task. transport1: in the radio SerLink
-       task. transport2: in initTasks().
+Socket  transport0   transport1   transport2   Receive callback (sets)      Instant handler (reads)
+------  -----------  -----------  -----------  ---------------------------  ------------------------
+CTRL0   yes          -            yes          controlSockReceiveHandler    controlSockInstantHandler
+LIFT0   -            -            yes          liftSockReceiveHandler       liftSockInstantHandler
+MOTOR   yes          -            -            motorSockReceiveHandler      motorSockInstantHandler
+ADC00   yes          -            -            -                            adcSockInstantHandler
+SDC00   yes          -            -            sdSockReceiveHandler         sdSockInstantHandler
+DBG00   yes          yes          yes          -                            debugSockInstantHandler
+LED01   -            yes (tx)     -            -                            -
+BTN01   -            yes (rx)     -            buttonSockReceiveHandler     -
+POT01   -            yes (rx)     -            potSockReceiveHandler        -
+HBT01   -            yes (rx)     -            heartbeatSockReceiveHandler  -
 
-LED01  The two sockets are joined by ledRelay (SerlinkRelay):
-       PC -> uart2 -> radio -> remote hub (Arduino UNO R4).
-       Relay acks come back as 'B'. The radio half exists only when RADIO_SERLINK = 1.
-
-MOTOR  motorB (TC78H611FNG on TIM8). BPnnn = open-loop percent (turns the
-       controller off), BSnnnn = closed-loop RPM, BGS = read required RPM.
-
-CTRL0  controllerB. The two sockets share handlers, so whichever link sends
-       last wins. Sets: BR (RPM), BD (direction), BI (gain).
-       Reads: BGR / BGD / BGF / BGI / BGA. While a liftB move is running, the
-       board also sends a 'U' status frame on both links.
-
-LIFT0  liftB. MQTT only; on serial it answers with a plain ACK_OK.
-       BS start, BG ground, BX stop, BT status. Commands are posted to
-       liftCmdQueue -> controlBTask. The board sends 'U' frames when a move ends.
-
-ADC00  Read-only. ADC1 on PA0/PA3/PA4/PA5; channel 1 is the motorB current
-       sense. Gn, Vn, GA.
-
-TACHO  Transmit only. CURRENTLY OFF: the sendData in controlBTask is
-       commented out.
-
-SDC00  SD card. Reads S (status) and E (diagnostics) are answered on the ack.
-       Commands O/R/C/W/L/P are posted to sdCmdQueue -> sdCardTask, and their
-       answers come back later as 'U' frames. The board also sends a status
-       frame when a card is inserted or removed.
-
-MQTT0  Debug only. Acquired in mqttRxTask, which forwards payloads received
-       on the test mqtt client out to uart2 as 'U' frames.
-
-RAD00  Debug only. The raw radio RX test task forwards packets to uart2
-       through it. It is still acquired with the current settings, but
-       nothing sends on it because that task doesn't run while
-       RADIO_SERLINK = 1.
-
-Socket count per transport (limit SERLINK_CONFIG__MAX_SOCKETS = 10)
---------------------------------------------------------------------
-transport0 (uart2): 9 sockets - RAD00, LED01, TACHO, MOTOR, CTRL0, ADC00,
-                    SDC00, DBG00, MQTT0. One free.
-transport1 (radio): 2 sockets - LED01, DBG00 (only when RADIO_SERLINK = 1).
-transport2 (MQTT):  3 sockets - DBG00, CTRL0, LIFT0.
+Socket count per transport (limit SERLINK_CONFIG__MAX_SOCKETS = 10):
+  transport0: 5 - MOTOR, CTRL0, ADC00, SDC00, DBG00
+  transport1: 5 - LED01, BTN01, POT01, HBT01, DBG00
+  transport2: 3 - DBG00, CTRL0, LIFT0
 
 On any transport, a protocol with no socket answers an 'S' PING with a plain
 ACK_OK instead of PINGBACK.
+
+------------------------------------------------------------------------------
+Hub modes (HubApp)
+------------------------------------------------------------------------------
+Idle / Control / Lift. hubApp, run by controlBTask, is the only thing that
+starts, stops or steers motorB; the socket handlers only parse and post.
+
+  Idle    + start (PC CTRL0 BS / MOTOR S, or remote button 1)  -> Control
+  Idle    + LIFT0 start / ground (PC only)                      -> Lift
+  any     + stop (CTRL0 BX, LIFT0 BX, remote button 1 running)  -> Idle
+  Lift ends (arrived / ground / tacho fault)                    -> Idle
+  Control + tacho fault                                         -> Idle
+  Control started by the remote + no remote frame for 2 s       -> Idle
+
+  - A start of any kind is ignored unless Idle.
+  - A direction change (CTRL0 BD, remote button 2) is ignored unless Idle.
+  - The remote's pot sets the speed of runs the REMOTE started only.
+
+------------------------------------------------------------------------------
+CTRL0 - hub <-> PC (MQTT) and serial. Selector B (controllerB).
+------------------------------------------------------------------------------
+Sets / commands (send as 'T'; the ack is a plain ACK_OK, read back to confirm):
+  BR<dddd>     target speed RPM, 4 digits. Does not start anything; live if running
+  BD<F|R>      selected direction - Idle only
+  BM<ddd>      max duty %, 3 digits, 20..100 (CONTROLB_TACHO_CHECK_MIN_PERCENT..100)
+  BI<dddddd>   integral gain, millionths, 6 digits
+  BS           start a Control run (source PC) - Idle only
+  BX           stop whatever is running
+
+Reads ('T', answered in the ack data):
+  BGR -> dddd                      target speed
+  BGD -> F|R                       selected direction
+  BGM -> ddd                       max duty
+  BGO -> <I|C|L><P|R|->            mode + who started the run
+  BGF -> 1|0                       tacho fault
+  BGI -> dddddd                    gain, millionths
+  BGA -> dddddd.dddd.dddd          gain . target RPM . measured RPM
+
+Status (hub -> PC, 'U', MQTT only; every 500 ms while running, once on reaching Idle):
+  <I|C|L><F|R><ddd>.<dddd>.<dddd>  mode, direction, duty %, measured RPM, current mA
+  e.g. CTRL0U001015CF030.0350.1234
+
+------------------------------------------------------------------------------
+LIFT0 - hub <-> PC (MQTT only). Selector B (liftB).
+------------------------------------------------------------------------------
+  BS<F|R><d..>   start, 1..6 digits of tacho edges - Idle only
+  BG<d..>        down to the ground sensor, max edges - Idle only
+  BX             stop (stops a Control run too)
+  BT             status read -> <M|I|G><dddddd>.<dddddd>  (travelled.target)
+  done (hub -> PC, 'U'): B<M|I|G><dddddd>.<dddddd>, when a move ends
+
+------------------------------------------------------------------------------
+Remote hub <-> hub (radio). Frame data is 9 characters at most.
+------------------------------------------------------------------------------
+  BTN01  remote -> hub  'T'  <id><event>: 1P = start/stop, 2P = direction
+                             (ButtonEvent format; L / R<ddd> are ignored)
+  POT01  remote -> hub  'U'  P<ddd>: pot percent, sent on a change of >= 2 %
+  HBT01  remote -> hub  'U'  H, every 500 ms (hub timeout 2000 ms)
+  LED01  hub -> remote  'U'  LedEvent format, on a change and every 1000 ms:
+                             A0 / A1 / AF0002020  run LED: Idle / Control / Lift (flash)
+                             B0 / B1              direction LED: forward / reverse
+                             The remote shows link-lost (LED A fast flash) after
+                             3 s with no LED01 frame.
+
+------------------------------------------------------------------------------
+Serial-only sockets (debug)
+------------------------------------------------------------------------------
+MOTOR  P<ddd> / D<F|R|D> drive the bridge directly, Idle only. S<dddd> = CTRL0
+       BR<dddd> + BS. Reads G<P|F|D|S>. Selector A or B (both -> motorB).
+ADC00  G<n> / V<n> / GA / E - ADC1 channels; channel 1 = motorB current sense.
+SDC00  SD card - see the top of main_tasks.cpp.
+DBG00  R (link check), S<nn> / SL (task stacks), M (MQTT link stats).
+
+Removed: LED01 uart2<->radio relay, RAD00, MQTT0, TACHO, the test mqtt client.

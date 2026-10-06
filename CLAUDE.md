@@ -130,11 +130,13 @@ Layers, bottom to top (`Frame` ↔ `Reader`/`Writer` ↔ `Transport` ↔ `Socket
 - **`Socket`** — `transport.acquireSocket("PROTO", receiveCallback, instantHandler)`.
   **`SERLINK_CONFIG__MAX_SOCKETS` is 10** (`SerLink_config.hpp`, per transport) and an
   acquire past the limit returns a silent `nullptr`, so every socket pointer is checked
-  before use. transport0 holds nine (RAD00, LED01, MOTOR, CTRL0, ADC00, TACHO, SDC00, and DBG00 /
-  MQTT0 acquired later from their own tasks); transport2 holds DBG00, CTRL0 and LIFT0.
+  before use. transport0 (uart2) holds MOTOR, CTRL0, ADC00, SDC00 and DBG00 (the last
+  acquired from serLink0Task); transport1 (radio) holds LED01, BTN01, POT01, HBT01 and
+  DBG00; transport2 (MQTT) holds DBG00, CTRL0 and LIFT0. `sockets_summary.txt` at the
+  repo root lists every socket and its frames.
   A socket belongs to one transport, but a handler does not — the same handler functions
-  can back sockets on several transports (CTRL0 on uart2 and MQTT drive the same
-  controller; last command wins).
+  can back sockets on several transports (CTRL0 on uart2 and MQTT post to the same
+  `hubApp`).
 
 The two handler kinds matter and are easy to confuse:
 
@@ -152,15 +154,17 @@ The only command so far is `PROTOS<rrr>004PING` → `PROTOA<rrr>008PINGBACK`. A 
 The replies are always `'A'`, never `'S'`, so two nodes that both handle `'S'` can't
 ping-pong. `Socket.hpp` has the details.
 
-### Three SerLink instances, and the relay
+### Three SerLink instances
 
 The same stack is instantiated three times:
 
 - **SerLink0** over USART2 (`transport0`, `writer0`/`reader0`, link = `HAL/uart2/`).
 - **SerLink1** over the nRF24L01 radio (`transport1`, `writer1`/`reader1`, link =
-  `Components/Radio/`), selected by the `RADIO_SERLINK` / `RADIO_TEST_TX` compile-time
-  switches at the top of `main_tasks.cpp`. The nRF24L01 driver is not thread-safe, so
-  exactly one owner is selected at build time — SerLink1, or one of the raw test tasks.
+  `Components/Radio/`), to the **remote hub** — an Arduino UNO R4 (sketch
+  `sketches/remote_hub` in `C:\Users\rwabc\Software\Embedded\Arduino\Arduino_uno_r4_gp`)
+  with two buttons, two LEDs and a pot. The nRF24L01 driver is not thread-safe, so
+  `radio1Task` is its only owner. The remote's frames carry **9 data characters at most**
+  (its `UART_BUFF_LEN`), so keep radio frame data that short.
 - **SerLink2** over MQTT (`transport2`, `writer2`/`reader2`, link =
   `Components/Adapters/Mqtt/SerLinkMqttAdapter` wrapping `mqtt2Client`). Frames travel as
   the MQTT payload, exactly as they appear on uart2: PC → board on
@@ -172,11 +176,11 @@ The same stack is instantiated three times:
 `Components/Adapters/` also holds a `LinkInterface` and uart/radio adapters for it, but
 nothing uses them yet — SerLink0/1 still take their link queues directly.
 
-`SerlinkRelay` bridges a socket on one transport to a socket on the other, in both
-directions, keeping the roll code so a source can match the returned relay ack (`'B'`)
-to the `'T'` it sent. The LED01 pair is relayed this way: PC → uart2 → radio → remote hub.
-All relaying happens in the single task that owns the relay; the Transport tasks only
-post to its queue.
+`Middlewares/SerLink/Relay/SerlinkRelay` can bridge a socket on one transport to a socket
+on another, in both directions, keeping the roll code so a source can match the returned
+relay ack (`'B'`) to the `'T'` it sent. Nothing uses it at the moment (the LED01
+uart2 ↔ radio relay was removed); all relaying would happen in the single task that owns
+the relay, with the Transport tasks only posting to its queue.
 
 `Radio` splits a serialised frame (up to 77 chars) across 32-byte nRF24L01 packets with a
 START flag in byte 0, and reassembles on newline — the same framing uart2 uses. All SPI
@@ -208,10 +212,36 @@ Bring-up order matters: park the IN pins low, *then* `enable()` standby. TIM8's 
 input (PA6) is armed, so a high on PA6 latches motorB's outputs off; nothing is wired
 to it yet (see the CubeMX section).
 
+### Hub mode: `HubApp`
+
+`Core/Inc/HubApp.hpp` / `Core/Src/HubApp.cpp` (file-scope `hubApp` in `main_tasks.cpp`)
+keeps the hub **Idle**, in **Control** (motorB held at a speed until stopped) or in
+**Lift** (a liftB move), and is the only thing that starts, stops or steers the motor.
+Socket handlers only parse: start/stop/direction/lift commands are posted to its queue
+(`AppCmd`), and `hubApp.run()` — called by `controlBTask` — applies them. Target speed,
+gain and max duty are written directly (each is any-task safe), so a read straight after
+a set sees it. The rules:
+
+- Control starts from the PC (CTRL0 `BS`, or MOTOR `S`) or the remote (button 1); Lift
+  from the PC only (LIFT0). **Any start is ignored unless Idle**, and so is a direction
+  change (CTRL0 `BD`, remote button 2) — the motor is never reversed at speed.
+- Any stop (CTRL0 `BX`, LIFT0 `BX`, remote button 1 while running) ends whatever runs.
+- The remote's pot sets the speed of runs **the remote** started; PC runs ignore it.
+  Every remote frame is a sign of life; a remote-started run stops after
+  `REMOTE_HEARTBEAT_TIMEOUT_MS` (2 s) of silence. PC-started runs carry on.
+- `hubApp` sends the CTRL0 status frame (`<I|C|L><F|R><duty>.<rpm>.<mA>`, MQTT only)
+  every `STATUS_PUBLISH_PERIOD_MS` while running and once on reaching Idle, and LED01 to
+  the remote on change and every second.
+- MOTOR `P`/`D` drive the bridge directly as a debug path and are refused unless Idle.
+
+`HubApp.cpp` is a new file in an existing folder, so it needs no `.cproject` edit — but
+CubeIDE only lists it in `Debug/Core/Src/subdir.mk` and `Debug/objects.list` after its
+own next build. Until then a shell `make` will not compile or link it.
+
 ### Motor control chain (motorB)
 
 `tachoB` → `controllerB` → `motorB`, with `liftB` on top; all run from `controlBTask`
-every `CONTROLB_PERIOD_MS` (50 ms).
+(`tachoB.update()` then `hubApp.run()`) every `CONTROLB_PERIOD_MS` (50 ms).
 
 - **`Tachometer`** — Hall sensor on PF4 (EXTI4, both edges, 2 edges/rev), timestamped
   from free-running 32-bit TIM5. The ISR only queues timestamps; `update()` turns them
@@ -219,37 +249,35 @@ every `CONTROLB_PERIOD_MS` (50 ms).
 - **`Controller`** — integral speed controller. It sees the motor only through the
   function pointers in `ControllerConfig` (captureless lambdas in `main_tasks.cpp`), and
   has its own `ControllerDirection` type, translated explicitly to the driver's. While
-  enabled it owns motorB's duty cycle. A MOTOR `S` (set speed) or CTRL0 `R` command
-  enables it; a MOTOR `P` (set percent) command disables it. Two safety limits cover a
+  enabled it owns motorB's duty cycle; `hubApp` enables it for a run and disables it
+  after. Two safety limits cover a
   dead or unplugged tacho, which reads zero and would wind the output to its maximum:
-  `outputMaxPercent` (50% for motorB) caps the duty, and `tachoUnresponsiveTimeout_S`
+  the max duty (`setOutputMaxPercent()`, CTRL0 `BM`; boot `CONTROLB_OUTPUT_MAX_PERCENT`,
+  50%) caps the duty, and `tachoUnresponsiveTimeout_S`
   (10 s, counted only once the duty reaches `tachoCheckMinPercent`, 20%, so a slow
   low-gain ramp never trips it) disables the controller, writes 0%, sets idle and latches `isTachoFault()`
-  (CTRL0 `BGF`). A Lift move in progress ends short. The next enable clears the fault.
+  (CTRL0 `BGF`). A run in progress ends and the hub goes Idle. The next start clears the
+  fault. The max duty can never be set below `tachoCheckMinPercent`.
 - **`Lift`** — direction and distance only (in tacho edges), on top of the controller.
   **Speed is purely the controller's concern.** `Lift` never sets it: a move runs at
-  whatever CTRL0 `BR<dddd>` last set, and that can be changed mid-move. `start()`
-  refuses a zero demand, because the move could never finish. controllerB boots with a
-  demand of `CONTROLB_BOOT_RPM` (100), set in `initTasks()` without enabling it.
-  `liftB.run()` also runs the controller, so `controlBTask` calls only `liftB.run()`.
-  LIFT0 commands arrive in the serLink2 task and reach `controlBTask` via
-  `liftCmdQueue`, never by direct calls. During a move, a CTRL0 direction change or a
-  zero speed can stall the move or cut it short.
+  `hubApp`'s target speed (CTRL0 `BR<dddd>`), which can be changed mid-move. `start()`
+  refuses a zero demand, because the move could never finish. The target boots at
+  `CONTROLB_BOOT_RPM` (100). `liftB.run()` also runs the controller (in Control runs
+  too), and `hubApp.run()` calls it. A zero target mid-move can still stall a move.
 - **`Adc`** — ADC1 scans PA0/PA3/PA4/PA5 by DMA into a circular buffer, triggered by TIM2,
   and averages each half buffer. PA3 is the motorB current sense, which is RC-filtered on
-  the board — fine for monitoring, too slow for overcurrent protection.
+  the board — fine for monitoring, too slow for overcurrent protection. The status frame
+  reports it as mA via `MOTORB_CURRENT_MA_PER_MV`.
 
-`controlBTask` publishes TACHO (`'U'`, no ack) every `TACHO_PUBLISH_PERIOD_MS`, which
-must be a whole multiple of `CONTROLB_PERIOD_MS` (enforced by a `static_assert`). While a
-liftB move is in progress (only then), it also sends a CTRL0 status frame on both uart2
-and MQTT.
+`STATUS_PUBLISH_PERIOD_MS` and `REMOTE_LED_REFRESH_MS` must be whole multiples of
+`CONTROLB_PERIOD_MS` (enforced by `static_assert`s).
 
 ### Task stacks
 
 `configCHECK_FOR_STACK_OVERFLOW` is 2. `vApplicationStackOverflowHook()` in
 `main_tasks.cpp` lights LD3 (red) and prints `STACK OVERFLOW: <task>` straight to the
 USART2 registers, so no debugger is needed. Most task stacks are 256 words. Any task that
-calls into the MQTT client (mqttTask, mqttRxTask, mqtt2Task, writer2Task, reader2Task)
+calls into the MQTT client (mqtt2Task, writer2Task, reader2Task)
 gets `MQTT_TASK_STACK_SIZE` (2 KB), because an MQTT publish runs the whole lwIP send
 path on the *caller's* stack, and 1 KB overflowed within seconds. sdCardTask also gets
 2 KB, because FatFs keeps its 512-byte long-file-name buffer on the caller's stack. Before trimming any
@@ -259,12 +287,12 @@ stack, check `DBG00T349002SL` (the task with the least stack free) or `DBG00T349
 ### Networking
 
 Static IP **192.168.0.200** (`LWIP/App/lwip.c`, no DHCP). `MqttPubSub` wraps lwIP's MQTT
-client; the broker address is `MQTT_BROKER_IP` in `main_tasks.cpp`. There are two
-connections to the broker: `mqtt` (test pub/sub) and `mqtt2Client` (SerLink2 only).
-They must stay separate instances with **different client IDs**. `MqttPubSub` has one
-unfiltered rxQueue, so sharing a client would let two readers steal each other's
-messages, and a duplicate client ID makes the broker kick the two connections off in a
-loop. Tasks that touch lwIP
+client; the broker address is `MQTT_BROKER_IP` in `main_tasks.cpp`. There is one
+connection to the broker, `mqtt2Client` (SerLink2 only). If another is ever added it
+must be a separate `MqttPubSub` instance with a **different client ID**: `MqttPubSub`
+has one unfiltered rxQueue, so sharing a client would let two readers steal each
+other's messages, and a duplicate client ID makes the broker kick the two connections
+off in a loop. Tasks that touch lwIP
 must wait for `netif_is_up(&gnetif) && netif_is_link_up(&gnetif)` — `initTasks()` runs
 before `MX_LWIP_Init()`, so the netif coming up is the readiness signal. An lwIP HTTP
 server runs from `Core/Src/httpd_app.c`.
@@ -273,9 +301,10 @@ server runs from `Core/Src/httpd_app.c`.
 
 USART2 on **PD5 (TX) / PD6 (RX)** via an FTDI cable on CN9 — *not* the ST-LINK virtual COM
 port (that is USART3 on PD8/PD9). 115200 baud, CR+LF line ends. Typing a frame into a
-terminal is the primary way to drive the board; worked examples for the DBG00, LED01,
-MOTOR, CTRL0, LIFT0, ADC00, TACHO and SDC00 (SD card) sockets are at the top of
-`Core/Src/main_tasks.cpp`.
+terminal is a primary way to drive the board (the Electron desktop app, over MQTT, is
+the other); worked examples for the DBG00, MOTOR, CTRL0, LIFT0, ADC00 and SDC00 (SD
+card) sockets are at the top of `Core/Src/main_tasks.cpp`. The CTRL0 status frame goes
+out on MQTT only, so a serial terminal no longer shows it — read `BGA`/`BGO` instead.
 LIFT0 exists only on SerLink2, so it has to go over MQTT (`mosquitto_pub` to
 `hub/aa26/serlink/down`), not the serial console.
 
@@ -289,8 +318,9 @@ LIFT0 exists only on SerLink2, so it has to go over MQTT (`mosquitto_pub` to
   task. The "one owner per driver" rule is enforced by convention and documented in the
   header of each such class — read it before calling a driver from a new task.
 - Tuning constants are `#define`s grouped with the object they configure at the top of
-  `main_tasks.cpp` (radio channel/payload, MQTT broker/topics/period, motor PWM frequency
-  and start percent, controller gain/limits/tacho timeout, lift forward direction, tacho publish period). Protocol-wide limits live in the `*_config.hpp` files under
+  `main_tasks.cpp` (MQTT broker/topics, motor PWM frequency and start percent, controller
+  gain/limits/tacho timeout/boot speed, motor current scale, lift forward direction, status
+  publish period, remote heartbeat timeout/LED refresh/pot range). Protocol-wide limits live in the `*_config.hpp` files under
   `Middlewares/SerLink/`.
 - Header comments in this codebase carry the design rationale — the *why*, the datasheet
   reference, the threading contract. Match that when adding code.
