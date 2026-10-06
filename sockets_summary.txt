@@ -1,0 +1,72 @@
+ControlHubAA26_V1 - SerLink socket summary
+(source: ControlHubAA26_V1/Core/Src/main_tasks.cpp)
+
+Transports:
+  transport0 = SerLink0, uart2 (USART2, FTDI cable)
+  transport1 = SerLink1, nRF24L01 radio (only when RADIO_SERLINK = 1, the current setting)
+  transport2 = SerLink2, MQTT (hub/aa26/serlink/down, hub/aa26/serlink/up)
+
+Socket  Interface 1  Interface 2   Receive callback           Instant handler
+------  -----------  ------------  -------------------------  -------------------------
+DBG00   uart2        MQTT, radio   -                          debugSockInstantHandler
+LED01   uart2        radio         - (relayed)                -
+MOTOR   uart2        -             motorSockReceiveHandler    motorSockInstantHandler
+CTRL0   uart2        MQTT          controlSockReceiveHandler  controlSockInstantHandler
+LIFT0   MQTT         -             liftSockReceiveHandler     liftSockInstantHandler
+ADC00   uart2        -             -                          adcSockInstantHandler
+TACHO   uart2        -             -                          -
+SDC00   uart2        -             sdSockReceiveHandler       sdSockInstantHandler
+MQTT0   uart2        -             -                          -
+RAD00   uart2        -             -                          -
+
+Comments
+--------
+DBG00  Separate sockets on each transport, all using the same handler.
+       R2 -> "OK"; Snn / SL -> task stack levels; M -> MQTT link stats.
+       transport0: acquired in serLink0Task. transport1: in the radio SerLink
+       task. transport2: in initTasks().
+
+LED01  The two sockets are joined by ledRelay (SerlinkRelay):
+       PC -> uart2 -> radio -> remote hub (Arduino UNO R4).
+       Relay acks come back as 'B'. The radio half exists only when RADIO_SERLINK = 1.
+
+MOTOR  motorB (TC78H611FNG on TIM8). BPnnn = open-loop percent (turns the
+       controller off), BSnnnn = closed-loop RPM, BGS = read required RPM.
+
+CTRL0  controllerB. The two sockets share handlers, so whichever link sends
+       last wins. Sets: BR (RPM), BD (direction), BI (gain).
+       Reads: BGR / BGD / BGF / BGI / BGA. While a liftB move is running, the
+       board also sends a 'U' status frame on both links.
+
+LIFT0  liftB. MQTT only; on serial it answers with a plain ACK_OK.
+       BS start, BG ground, BX stop, BT status. Commands are posted to
+       liftCmdQueue -> controlBTask. The board sends 'U' frames when a move ends.
+
+ADC00  Read-only. ADC1 on PA0/PA3/PA4/PA5; channel 1 is the motorB current
+       sense. Gn, Vn, GA.
+
+TACHO  Transmit only. CURRENTLY OFF: the sendData in controlBTask is
+       commented out.
+
+SDC00  SD card. Reads S (status) and E (diagnostics) are answered on the ack.
+       Commands O/R/C/W/L/P are posted to sdCmdQueue -> sdCardTask, and their
+       answers come back later as 'U' frames. The board also sends a status
+       frame when a card is inserted or removed.
+
+MQTT0  Debug only. Acquired in mqttRxTask, which forwards payloads received
+       on the test mqtt client out to uart2 as 'U' frames.
+
+RAD00  Debug only. The raw radio RX test task forwards packets to uart2
+       through it. It is still acquired with the current settings, but
+       nothing sends on it because that task doesn't run while
+       RADIO_SERLINK = 1.
+
+Socket count per transport (limit SERLINK_CONFIG__MAX_SOCKETS = 10)
+--------------------------------------------------------------------
+transport0 (uart2): 9 sockets - RAD00, LED01, TACHO, MOTOR, CTRL0, ADC00,
+                    SDC00, DBG00, MQTT0. One free.
+transport1 (radio): 2 sockets - LED01, DBG00 (only when RADIO_SERLINK = 1).
+transport2 (MQTT):  3 sockets - DBG00, CTRL0, LIFT0.
+
+On any transport, a protocol with no socket answers an 'S' PING with a plain
+ACK_OK instead of PINGBACK.
