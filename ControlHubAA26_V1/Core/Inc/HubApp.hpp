@@ -28,8 +28,10 @@
  *
  * A start of either kind is ignored unless Idle, and so is a direction
  * change - the motor is never reversed at speed. The target speed may be
- * changed at any time: it applies to a run in progress (Lift, or a PC
- * started Control) and to the next start.
+ * changed while Idle or in Control: it applies at once to a PC started
+ * Control run (the dashboard's speed dial) and to the next start. It is
+ * refused during a lift move, which runs at the speed it started with -
+ * a move's distance and stop are planned around that speed.
  *
  * The remote
  * ----------
@@ -56,7 +58,10 @@
  * task running the controller and the lift - run() calls lift->run().
  * Everything else here is safe from any task: post() is a non-blocking
  * queue send, and the setters and getters each read or write one volatile
- * byte, half word or word.
+ * byte, half word or word. setTargetRpm() checks the mode first, which
+ * can change under it: a set racing a lift start can still store a new
+ * target, which the move then does not use (run() applies it in Control
+ * only) - BGR reads the new value while the move runs at the old one.
  *
  * Like the drivers, a HubApp is a file scope object: the constructor only
  * stores its config, and init() (before the scheduler starts) creates the
@@ -140,8 +145,9 @@ class HubApp
     bool post(const AppCmd& cmd);
 
     // Any task. The target speed: a PC run's, a lift move's, and a remote
-    // run's until the pot is moved. Applied by the next run().
-    void     setTargetRpm(uint16_t rpm);
+    // run's until the pot is heard from. Applied to a Control run by the
+    // next run(). False, and the target unchanged, during a lift move.
+    bool     setTargetRpm(uint16_t rpm);
     uint16_t getTargetRpm() const;
 
     // Any task, from the remote's socket handlers. Every remote frame

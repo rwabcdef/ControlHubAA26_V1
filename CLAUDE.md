@@ -226,7 +226,9 @@ a set sees it. The rules:
   from the PC only (LIFT0). **Any start is ignored unless Idle**, and so is a direction
   change (CTRL0 `BD`, remote button 2) — the motor is never reversed at speed.
 - Any stop (CTRL0 `BX`, LIFT0 `BX`, remote button 1 while running) ends whatever runs.
-- The remote's pot sets the speed of runs **the remote** started; PC runs ignore it.
+- The target speed (CTRL0 `BR`) is live in a PC-started Control run and refused during
+  a Lift move. The remote's pot sets the speed of runs **the remote** started; PC runs
+  ignore it.
   Every remote frame is a sign of life; a remote-started run stops after
   `REMOTE_HEARTBEAT_TIMEOUT_MS` (2 s) of silence. PC-started runs carry on.
 - `hubApp` sends the CTRL0 status frame (`<I|C|L><F|R><duty>.<rpm>.<mA>`, MQTT only)
@@ -260,10 +262,11 @@ own next build. Until then a shell `make` will not compile or link it.
   fault. The max duty can never be set below `tachoCheckMinPercent`.
 - **`Lift`** — direction and distance only (in tacho edges), on top of the controller.
   **Speed is purely the controller's concern.** `Lift` never sets it: a move runs at
-  `hubApp`'s target speed (CTRL0 `BR<dddd>`), which can be changed mid-move. `start()`
-  refuses a zero demand, because the move could never finish. The target boots at
-  `CONTROLB_BOOT_RPM` (100). `liftB.run()` also runs the controller (in Control runs
-  too), and `hubApp.run()` calls it. A zero target mid-move can still stall a move.
+  `hubApp`'s target speed (CTRL0 `BR<dddd>`) as it was at the start — `hubApp` refuses
+  `BR` during a move and only re-applies the target in Control, where it is live (the
+  app's speed dial). `start()` refuses a zero demand, because the move could never
+  finish. The target boots at `CONTROLB_BOOT_RPM` (100). `liftB.run()` also runs the
+  controller (in Control runs too), and `hubApp.run()` calls it.
 - **`Adc`** — ADC1 scans PA0/PA3/PA4/PA5 by DMA into a circular buffer, triggered by TIM2,
   and averages each half buffer. PA3 is the motorB current sense, which is RC-filtered on
   the board — fine for monitoring, too slow for overcurrent protection. The status frame

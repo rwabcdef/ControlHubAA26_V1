@@ -57,7 +57,20 @@ bool HubApp::post(const AppCmd& cmd)
   return (queue != nullptr) && (xQueueSend(queue, &cmd, 0U) == pdTRUE);
 }
 
-void HubApp::setTargetRpm(uint16_t rpm)              { targetRpm = rpm; }
+bool HubApp::setTargetRpm(uint16_t rpm)
+{
+  /* A lift move keeps the speed it started with. The mode is read from
+     another task, so a set racing a lift start can still land - run()
+     only applies the target in Control, so the move is unaffected and the
+     new target waits for the next start. */
+  if(currentMode == mode::lift)
+  {
+    return false;
+  }
+  targetRpm = rpm;
+  return true;
+}
+
 uint16_t HubApp::getTargetRpm() const                { return targetRpm; }
 HubApp::mode HubApp::getMode() const                 { return currentMode; }
 HubApp::source HubApp::getSource() const             { return runSource; }
@@ -124,9 +137,10 @@ void HubApp::run()
     }
   }
 
-  /* The speed, live: a change of target, or a turn of the pot, reaches
-     a run in progress on the next controller pass. */
-  if(currentMode != mode::idle)
+  /* The speed, live in Control: a change of target, or a turn of the pot,
+     reaches the run on the next controller pass. A lift move is left at
+     the speed apply() started it with. */
+  if(currentMode == mode::control)
   {
     config.controller->setRequiredRpm(runRpm());
   }

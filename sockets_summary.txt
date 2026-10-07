@@ -55,7 +55,8 @@ starts, stops or steers motorB; the socket handlers only parse and post.
 CTRL0 - hub <-> PC (MQTT) and serial. Selector B (controllerB).
 ------------------------------------------------------------------------------
 Sets / commands (send as 'T'; the ack is a plain ACK_OK, read back to confirm):
-  BR<dddd>     target speed RPM, 4 digits. Does not start anything; live if running
+  BR<dddd>     target speed RPM, 4 digits. Does not start anything; live in a Control
+               run, refused (target unchanged) during a lift move
   BD<F|R>      selected direction - Idle only
   BM<ddd>      max duty %, 3 digits, 20..100 (CONTROLB_TACHO_CHECK_MIN_PERCENT..100)
   BI<dddddd>   integral gain, millionths, 6 digits
@@ -89,7 +90,7 @@ Remote hub <-> hub (radio). Frame data is 9 characters at most.
 ------------------------------------------------------------------------------
   BTN01  remote -> hub  'T'  <id><event>: 1P = start/stop, 2P = direction
                              (ButtonEvent format; L / R<ddd> are ignored)
-  POT01  remote -> hub  'U'  P<ddd>: pot percent, sent on a change of >= 2 %
+  POT01  remote -> hub  'U'  P<ddd>: pot percent, sent on a change of >= 2 % and every 1000 ms
   HBT01  remote -> hub  'U'  H, every 500 ms (hub timeout 2000 ms)
   LED01  hub -> remote  'U'  LedEvent format, on a change and every 1000 ms:
                              A0 / A1 / AF0002020  run LED: Idle / Control / Lift (flash)

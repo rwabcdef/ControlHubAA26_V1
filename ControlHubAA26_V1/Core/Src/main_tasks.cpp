@@ -56,7 +56,7 @@ CTRL0T523002BS      # start
 CTRL0T523002BX      # stop (a lift move too)
 
 # sets - plain ACK_OK; a malformed set is dropped silently, so read it back
-CTRL0T516006BR0120  # target speed 120 RPM - live if running
+CTRL0T516006BR0120  # target speed 120 RPM - live in Control, refused in Lift
 CTRL0T523003BDR     # selected direction reverse (F forward) - Idle only
 CTRL0T516005BM050   # max duty 50% (CONTROLB_TACHO_CHECK_MIN_PERCENT..100) - live
 CTRL0T516008BI002000  # integral gain = 0.002 (6 digits, millionths: 000000..999999).
@@ -79,8 +79,8 @@ CTRL0U001015CF030.0350.1234  # Control, forward, duty 30%, 350 RPM, 1234 mA
 
 # Lift socket - liftB, over MQTT only (SerLink2: publish to hub/aa26/serlink/down).
 # Direction and distance only - distance in tachoB edges (2 per rev). The speed
-# is the target speed: set it first with CTRL0 BR<dddd> (it can be changed
-# mid-move); it boots at CONTROLB_BOOT_RPM (100). A start with the target at 0,
+# is the target speed: set it first with CTRL0 BR<dddd> (a BR during the move
+# is refused); it boots at CONTROLB_BOOT_RPM (100). A start with the target at 0,
 # or while not Idle, is ignored silently, so nothing moves.
 CTRL0T516006BR0020  # speed for the moves that follow: 20 RPM
 LIFT0U645006BSF234  # start liftB forward for 234 edges (1..6 digits)
@@ -693,11 +693,11 @@ Controller controllerB(controllerBConfig);
 // Control run (no lift move) is driven through it too.
 //
 // liftB is direction and distance only - the speed is controllerB's,
-// hubApp's target speed (CTRL0 BR<dddd>), changeable during the move. A
-// start with a zero demand is refused. hubApp refuses direction changes
-// while anything runs, so a move cannot be stalled that way; a target
-// of zero mid-move still would - stop the lift instead (LIFT0 BX). See
-// Speed in Lift.hpp.
+// hubApp's target speed (CTRL0 BR<dddd>) as it was at the start: hubApp
+// refuses BR during a move and does not re-apply the target. A start
+// with a zero demand is refused. hubApp refuses direction changes while
+// anything runs too, so a move cannot be stalled from outside. See Speed
+// in Lift.hpp.
 //
 // Distance is tachoB edges, PULSES_PER_REV (2) per revolution - see
 // Tachometer::getEdges() for why not revolutions.
@@ -1490,8 +1490,9 @@ void motorSockReceiveHandler(const char* data, uint16_t dataLen)
          readUintField(&data[2], MOTOR_RPM_FIELD_WIDTH, &rpm))
       {
         /* Target first, so the start already runs at it. Four digits
-           cannot exceed uint16_t. The start is ignored unless Idle. */
-        hubApp.setTargetRpm((uint16_t)rpm);
+           cannot exceed uint16_t. The start is ignored unless Idle, and
+           the target is refused during a lift move. */
+        (void)hubApp.setTargetRpm((uint16_t)rpm);
 
         AppCmd cmd = {};
         cmd.op = AppCmd::start;
@@ -1582,10 +1583,11 @@ bool motorSockInstantHandler(SerLink::Frame &rxFrame, uint16_t* dataLen, char* d
 //   accepted; read back to confirm:
 //
 //     CTRL0T516006BR0120   target speed = 120 RPM (always 4 digits, zero
-//                          padded). Does NOT start anything: it is the
-//                          speed of the next Control run or lift move,
-//                          and of the one in progress (bar a remote run,
-//                          whose speed is the remote's pot)
+//                          padded, 0000 allowed). Does NOT start anything:
+//                          it is the speed of the next Control run or lift
+//                          move, and live in a Control run in progress (bar
+//                          a remote run, whose speed is the remote's pot).
+//                          Ignored during a lift move - read BGR to check
 //     CTRL0T523003BDF      selected direction = forward - Idle only
 //     CTRL0T523003BDR      selected direction = reverse - Idle only
 //     CTRL0T516005BM050    max duty = 50% (always 3 digits). From
@@ -1720,11 +1722,12 @@ void controlSockReceiveHandler(const char* data, uint16_t dataLen)
     {
       uint32_t rpm;
 
-      /* Four digits cannot exceed uint16_t. */
+      /* Four digits cannot exceed uint16_t. Refused during a lift move;
+         the ack has gone, so the PC reads BGR back to tell. */
       if((dataLen == CONTROL_CMD_SET_RPM_LEN) &&
          readUintField(&data[2], CONTROL_RPM_FIELD_WIDTH, &rpm))
       {
-        hubApp.setTargetRpm((uint16_t)rpm);
+        (void)hubApp.setTargetRpm((uint16_t)rpm);
       }
       return;
     }

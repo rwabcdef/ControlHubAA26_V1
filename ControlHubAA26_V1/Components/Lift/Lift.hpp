@@ -40,7 +40,9 @@
  * cover its distance would sit "moving" for ever (the tacho timeout
  * does not catch it - zero speed is what was asked for). For the same
  * reason, setting the demand to zero mid-move leaves the move stuck
- * until stop().
+ * until stop(). (In this firmware, hubApp holds a move at the speed it
+ * started with - it refuses CTRL0 BR during a move - so neither happens;
+ * see HubApp.hpp.)
  *
  * Distance
  * --------
