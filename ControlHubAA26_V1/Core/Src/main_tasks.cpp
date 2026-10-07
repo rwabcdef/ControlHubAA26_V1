@@ -18,6 +18,10 @@
  DBG00T349002SL      # the task with the least stack free, same format
  DBG00T349001M       # MQTT link (SerLink2): C/D connected, rx, tx, tx dropped, other topic
 
+ # event echo - sent by the board, unasked: MQTT and radio events, see logEvent()
+ DBG00U123008BTN01 1P        # remote button 1 pressed
+ DBG00U124012CTRL0 BR0120    # the PC set the target speed
+
  # ping - any socket, any link ('S' = system frame, see Socket.hpp). Answered by
  # SerLink itself; never reaches the socket's handlers.
  MOTORS045004PING    # -> MOTORA045008PINGBACK  socket exists on this link
@@ -382,6 +386,7 @@ bool motorSockInstantHandler(SerLink::Frame &rxFrame, uint16_t* dataLen, char* d
 // CTRL0 socket handlers - speed controller commands, documented above
 // their implementations, below the MOTOR socket's.
 void controlSockReceiveHandler(const char* data, uint16_t dataLen);
+void controlMqttSockReceiveHandler(const char* data, uint16_t dataLen);
 bool controlSockInstantHandler(SerLink::Frame &rxFrame, uint16_t* dataLen, char* data);
 
 // LIFT0 socket handlers - lift commands, documented above their
@@ -575,7 +580,7 @@ Tachometer tachoB(TIM5, GPIOF, TACHOB_PIN);
 // frame that went missing is better dropped than retried - the next one is
 // only STATUS_PUBLISH_PERIOD_MS away, and waiting on an ack would stall
 // the control loop.
-#define STATUS_PUBLISH_PERIOD_MS 500
+#define STATUS_PUBLISH_PERIOD_MS 250
 
 // hubApp publishes on a whole number of controlB passes rather than
 // keeping a second timebase, so the periods have to divide.
@@ -772,6 +777,46 @@ Adc adc1(&hadc1, &htim2, ADC1_NUM_CHANNELS);
 SerLink::Socket* adcSocket = nullptr;
 
 //--------------------------------------------------------------
+// The event echo: user generated and low rate frames on MQTT and the radio
+// are repeated to the serial console, out of transport0's DBG00 socket, as
+// a 'U' frame whose data is "<protocol> <data>":
+//
+//   DBG00U<rrr>008BTN01 1P      remote button 1 pressed
+//   DBG00U<rrr>009POT01 P050    remote pot moved to 50% (on a change only)
+//   DBG00U<rrr>012CTRL0 BR0120  CTRL0 set or command from the PC (MQTT)
+//   DBG00U<rrr>013LIFT0 BSF234  LIFT0 command from the PC
+//   DBG00U<rrr>021LIFT0 BI000234.000234  LIFT0 done frame, hub -> PC
+//   DBG00U<rrr>008LED01 A1      LED01 to the remote, on a change only
+//
+// Not echoed: anything periodic or high rate - the CTRL0 status frame,
+// reads (CTRL0 BG*, LIFT0 BT, DBG00), HBT01, the LED01 refresh - and the
+// serial console's own commands.
+
+// transport0's DBG00, acquired in initTasks().
+SerLink::Socket* debugSocket = nullptr;
+
+// Any task: sendData() only queues the frame for transport0, without
+// blocking, and drops it if the queue is full.
+static void logEvent(const char* protocol, const char* data, uint16_t dataLen)
+{
+  if(debugSocket == nullptr)
+  {
+    return;
+  }
+
+  char buf[SerLink::Frame::MAX_DATALEN];
+  const uint16_t protoLen = (uint16_t)strlen(protocol);
+  const uint16_t room = (uint16_t)(sizeof(buf) - protoLen - 1U);
+  if(dataLen > room) { dataLen = room; }
+
+  memcpy(buf, protocol, protoLen);
+  buf[protoLen] = ' ';
+  memcpy(&buf[protoLen + 1U], data, dataLen);
+
+  (void)debugSocket->sendData(buf, (uint16_t)(protoLen + 1U + dataLen), false);
+}
+
+//--------------------------------------------------------------
 // hubApp - the hub's mode (Idle / Control / Lift) and the arbiter of every
 // command that starts, stops or steers motorB. See HubApp.hpp. Owned by
 // controlBTask; the socket handlers only parse and post to it.
@@ -795,7 +840,8 @@ static const HubAppConfig hubAppConfig =
   REMOTE_LED_REFRESH_MS,
   REMOTE_HEARTBEAT_TIMEOUT_MS,
   REMOTE_LED_RUN_ID,
-  REMOTE_LED_DIRECTION_ID
+  REMOTE_LED_DIRECTION_ID,
+  logEvent
 };
 
 HubApp hubApp(hubAppConfig);
@@ -1040,7 +1086,7 @@ void initTasks()
      starts, so no task can see the socket half-registered.
 
      transport0 holds five of the SERLINK_CONFIG__MAX_SOCKETS slots -
-     MOTOR, CTRL0, ADC00 and SDC00 here, DBG00 later, from serLink0Task.
+     MOTOR, CTRL0, DBG00, ADC00 and SDC00, all here.
      An acquire past the limit returns a silent nullptr, which is why
      every socket pointer is checked before use. */
   motorSocket = transport0.acquireSocket("MOTOR", motorSockReceiveHandler,
@@ -1049,6 +1095,9 @@ void initTasks()
   /* Same split as MOTOR: sets in serLink0Task, reads on the ack. */
   controlSocket = transport0.acquireSocket("CTRL0", controlSockReceiveHandler,
     controlSockInstantHandler);
+
+  /* Reads on the ack, and the event echo's way out (logEvent()). */
+  debugSocket = transport0.acquireSocket("DBG00", nullptr, debugSockInstantHandler);
 
   /* Analog inputs. init() only builds the queue and registers adc1 for the
      HAL callbacks; start() arms the DMA and starts TIM2, after which the
@@ -1107,7 +1156,9 @@ void initTasks()
   transport2.init(transport2Queue);
 
   transport2.acquireSocket("DBG00", nullptr, debugSockInstantHandler);
-  controlMqttSocket = transport2.acquireSocket("CTRL0", controlSockReceiveHandler,
+  /* The same handlers as uart2's CTRL0, but the sets and commands are
+     echoed to the serial console first. */
+  controlMqttSocket = transport2.acquireSocket("CTRL0", controlMqttSockReceiveHandler,
     controlSockInstantHandler);
 
   /* Commands in serLink2Task, posted on to hubApp; the status read on the
@@ -1191,10 +1242,6 @@ void startReader0Task(void *argument)
 void startSerLink0Task(void *argument)
 {
   /* USER CODE BEGIN startSerLink0Task */
-  SerLink::Socket* debugSocket = transport0.acquireSocket("DBG00", nullptr, debugSockInstantHandler);
-
-
-
   for(;;)
   {
     transport0.run();
@@ -1790,6 +1837,14 @@ void controlSockReceiveHandler(const char* data, uint16_t dataLen)
   (void)hubApp.post(cmd);
 }
 
+// CTRL0 over MQTT: echo, then the same as uart2's. Reads never get here -
+// they are answered on the ack - so only sets and commands are echoed.
+void controlMqttSockReceiveHandler(const char* data, uint16_t dataLen)
+{
+  logEvent("CTRL0", data, dataLen);
+  controlSockReceiveHandler(data, dataLen);
+}
+
 // The reads. Runs in reader0Task or reader2Task, before the ack is sent.
 // Returns false for the sets, leaving their ack a plain ACK_OK. Getters
 // only, so no lock - same reasoning as motorSockInstantHandler().
@@ -1986,6 +2041,7 @@ static void sendLiftDone()
   data[0] = 'B';   // liftB, the only lift
   writeLiftStatus(liftB, &data[1]);
   liftMqttSocket->sendData(data, (uint16_t)sizeof(data), LIFT_DONE_ACK);
+  logEvent("LIFT0", data, (uint16_t)sizeof(data));
 }
 
 // Runs in serLink2Task. Parses and posts; liftB itself is only touched
@@ -1993,6 +2049,9 @@ static void sendLiftDone()
 // command.
 void liftSockReceiveHandler(const char* data, uint16_t dataLen)
 {
+  /* The BT read is answered on the ack and never gets here. */
+  logEvent("LIFT0", data, dataLen);
+
   if(dataLen < LIFT_CMD_MIN_LEN)
   {
     return;
@@ -2106,6 +2165,7 @@ bool liftSockInstantHandler(SerLink::Frame &rxFrame, uint16_t* dataLen, char* da
 void buttonSockReceiveHandler(const char* data, uint16_t dataLen)
 {
   hubApp.remoteAlive();
+  logEvent("BTN01", data, dataLen);
 
   if((dataLen != REMOTE_BUTTON_LEN) || (data[1] != 'P'))
   {
@@ -2127,11 +2187,21 @@ void potSockReceiveHandler(const char* data, uint16_t dataLen)
 {
   hubApp.remoteAlive();
 
+  /* The remote re-sends the pot every second, so only a change is echoed.
+     serLink1Task only, so a plain static will do. */
+  static uint32_t lastLogged = 0xFFFFFFFFU;
+
   uint32_t percent;
   if((dataLen == REMOTE_POT_LEN) &&
      readUintField(&data[1], REMOTE_POT_WIDTH, &percent))
   {
     hubApp.setPotPercent((percent > 100U) ? 100U : (uint8_t)percent);
+
+    if(percent != lastLogged)
+    {
+      lastLogged = percent;
+      logEvent("POT01", data, dataLen);
+    }
   }
 }
 

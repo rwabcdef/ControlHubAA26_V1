@@ -49,7 +49,8 @@
  *   - the CTRL0 status frame on statusSocket, every statusPeriodMs while
  *     running and once on reaching Idle - see writeStatus();
  *   - LED01 frames to the remote on ledSocket, on a change and every
- *     ledRefreshMs, which is also the remote's sign that the hub is there;
+ *     ledRefreshMs, which is also the remote's sign that the hub is there
+ *     (a change, not a refresh, is also passed to config.logEvent);
  *   - the LIFT0 done frame, through onLiftDone, when a move ends.
  *
  * Threading
@@ -98,6 +99,11 @@ struct HubAppConfig
   uint16_t heartbeatTimeoutMs;
   char     ledRunId;            // LED01 ids on the remote
   char     ledDirectionId;
+
+  // Echoes an event frame to the serial console as "<protocol> <data>".
+  // Called with each LED01 frame that reports a change - not the periodic
+  // refresh. May be nullptr.
+  void (*logEvent)(const char* protocol, const char* data, uint16_t dataLen);
 };
 
 // A command for run(). One queue item per command, so its fields always

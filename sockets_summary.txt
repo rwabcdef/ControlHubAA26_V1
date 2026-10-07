@@ -72,7 +72,7 @@ Reads ('T', answered in the ack data):
   BGI -> dddddd                    gain, millionths
   BGA -> dddddd.dddd.dddd          gain . target RPM . measured RPM
 
-Status (hub -> PC, 'U', MQTT only; every 500 ms while running, once on reaching Idle):
+Status (hub -> PC, 'U', MQTT only; every 250 ms while running, once on reaching Idle):
   <I|C|L><F|R><ddd>.<dddd>.<dddd>  mode, direction, duty %, measured RPM, current mA
   e.g. CTRL0U001015CF030.0350.1234
 
@@ -106,5 +106,9 @@ MOTOR  P<ddd> / D<F|R|D> drive the bridge directly, Idle only. S<dddd> = CTRL0
 ADC00  G<n> / V<n> / GA / E - ADC1 channels; channel 1 = motorB current sense.
 SDC00  SD card - see the top of main_tasks.cpp.
 DBG00  R (link check), S<nn> / SL (task stacks), M (MQTT link stats).
+       Event echo (hub -> serial console, 'U', uart2 only): data "<protocol> <data>"
+       for BTN01 in, POT01 in (on a change), CTRL0 sets/commands in over MQTT,
+       LIFT0 commands in, the LIFT0 done frame, LED01 out (on a change).
+       e.g. DBG00U123008BTN01 1P. Never the CTRL0 status frame, reads, HBT01.
 
 Removed: LED01 uart2<->radio relay, RAD00, MQTT0, TACHO, the test mqtt client.

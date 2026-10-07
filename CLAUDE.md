@@ -283,7 +283,10 @@ USART2 registers, so no debugger is needed. Most task stacks are 256 words. Any 
 calls into the MQTT client (mqtt2Task, writer2Task, reader2Task)
 gets `MQTT_TASK_STACK_SIZE` (2 KB), because an MQTT publish runs the whole lwIP send
 path on the *caller's* stack, and 1 KB overflowed within seconds. sdCardTask also gets
-2 KB, because FatFs keeps its 512-byte long-file-name buffer on the caller's stack. Before trimming any
+2 KB, because FatFs keeps its 512-byte long-file-name buffer on the caller's stack.
+lwIP's `tcpip_thread` gets 2 KB too (`TCPIP_THREAD_STACKSIZE`, set in the `.ioc`, so
+CubeMX keeps it; CMSIS-RTOS v2 takes **bytes**): it runs the whole MQTT receive path,
+and the CubeMX default of 1024 overflowed once the app's speed dial sent frames steadily. Before trimming any
 stack, check `DBG00T349002SL` (the task with the least stack free) or `DBG00T349003Snn`
 (task nn by index).
 
@@ -310,6 +313,12 @@ card) sockets are at the top of `Core/Src/main_tasks.cpp`. The CTRL0 status fram
 out on MQTT only, so a serial terminal no longer shows it — read `BGA`/`BGO` instead.
 LIFT0 exists only on SerLink2, so it has to go over MQTT (`mosquitto_pub` to
 `hub/aa26/serlink/down`), not the serial console.
+
+The console also shows an **event echo**: `logEvent()` in `main_tasks.cpp` repeats the
+user-driven, low-rate frames from MQTT and the radio as DBG00 `'U'` frames whose data is
+`<protocol> <data>` (e.g. `DBG00U123008BTN01 1P`) — BTN01, POT01 and LED01 on a change,
+CTRL0 sets/commands over MQTT, LIFT0 commands and the done frame. The status frame, reads
+(`BG*`, `BT`), HBT01 and the LED01 refresh are deliberately left out.
 
 ## Conventions
 

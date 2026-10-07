@@ -373,16 +373,26 @@ void HubApp::updateLeds(bool force)
     ledPasses = 0U;
   }
 
-  if(force || refresh || (strcmp(&run[1], ledRunState) != 0))
+  const bool runChanged = (strcmp(&run[1], ledRunState) != 0);
+  if(force || refresh || runChanged)
   {
     strcpy(ledRunState, &run[1]);
     ledSocket->sendData(run, (uint16_t)strlen(run), false);
+    if(runChanged && (config.logEvent != nullptr))
+    {
+      config.logEvent("LED01", run, (uint16_t)strlen(run));
+    }
   }
 
-  if(force || refresh || (dirState != ledDirState))
+  const bool dirChanged = (dirState != ledDirState);
+  if(force || refresh || dirChanged)
   {
     ledDirState = dirState;
     char dir[2] = { config.ledDirectionId, dirState };
     ledSocket->sendData(dir, 2U, false);
+    if(dirChanged && (config.logEvent != nullptr))
+    {
+      config.logEvent("LED01", dir, 2U);
+    }
   }
 }
