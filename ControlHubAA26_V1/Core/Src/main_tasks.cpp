@@ -524,11 +524,24 @@ Led ledBoardGreen(GPIOB, GPIO_PIN_0);
 #define MOTORB_START_PERCENT  20
 #define MOTOR_START_DELAY_MS   2000
 
+// Direction output for the current measurement hardware, so it knows
+// which way motorB's current flows - see "Direction output" in
+// TC78H611FNG.hpp. PA15 (JTDI, free because the .ioc debug mode is
+// Serial Wire) is claimed in the .ioc as GPIO_Output MOTORB_DIR, so
+// MX_GPIO_Init() sets it up low; the driver then re-applies it.
+// MOTORB_DIRECTION_FORWARD_HIGH true drives it high for forward, low
+// for reverse.
+#define MOTORB_DIRECTION_PORT          MOTORB_DIR_GPIO_Port
+#define MOTORB_DIRECTION_PIN           MOTORB_DIR_Pin
+#define MOTORB_DIRECTION_FORWARD_HIGH  true
+
 TC78H611FNG_Standby motorStandby(GPIOB, GPIO_PIN_8);
 
 TC78H611FNG motorB(GPIOC, GPIO_PIN_6,   // IN1B, TIM8_CH1
                    GPIOC, GPIO_PIN_7,   // IN2B, TIM8_CH2
-                   MOTORB_PWM_FREQ);
+                   MOTORB_PWM_FREQ,
+                   MOTORB_DIRECTION_PORT, MOTORB_DIRECTION_PIN,
+                   MOTORB_DIRECTION_FORWARD_HIGH);
 
 // Acquired on transport0 (uart2), so motor commands arrive over the
 // serial link rather than the radio.

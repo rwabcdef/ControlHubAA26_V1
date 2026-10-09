@@ -27,6 +27,20 @@
  * Note that the IC's inputs are rated to 500 kHz max and its outputs
  * carry a ~300 ns internal dead time, so the pwmFreqValues range is
  * comfortably within spec.
+ *
+ * Direction output (optional): a plain push-pull GPIO that mirrors the
+ * direction, for external hardware that needs to know which way the
+ * current flows (e.g. a current measurement circuit). It is not a
+ * TC78H611FNG pin. directionForwardHigh picks the polarity: true drives
+ * the pin high for forward and low for reverse, false the opposite.
+ * idle leaves the pin at its last level - no current flows then, and
+ * holding it saves a needless toggle on every stop. Until the first
+ * forward/reverse it sits at the forward level. Pass a null
+ * directionPort to leave the feature out.
+ *
+ * On a direction change the pin is updated BEFORE the PWM is applied,
+ * so the measurement hardware is already switched by the time current
+ * starts flowing the new way.
  */
 
 #ifndef TC78H611FNG_HPP_
@@ -49,7 +63,10 @@ class TC78H611FNG
     // frequency uses PWM's pwmFreqValues enum.
     TC78H611FNG(GPIO_TypeDef* outAPort, uint16_t outAPin,
                 GPIO_TypeDef* outBPort, uint16_t outBPin,
-                pwmFreqValues frequency);
+                pwmFreqValues frequency,
+                GPIO_TypeDef* directionPort = nullptr,
+                uint16_t directionPin = 0U,
+                bool directionForwardHigh = true);
 
     // Duty cycle applied to whichever output the current direction puts
     // the PWM on. Values above 100 are clamped to 100. Setting a percent
@@ -72,8 +89,20 @@ class TC78H611FNG
     direction currentDirection;
     uint8_t percent;
 
+    GPIO_TypeDef* directionPort; // nullptr - no direction output
+    uint16_t directionPin;
+    bool directionForwardHigh;
+    bool directionInitialized;
+
     // Pushes currentDirection/percent out to the two PWM channels.
     void applyOutputs();
+
+    // Drives the direction output for currentDirection (idle leaves it
+    // alone). Configures the GPIO on first use, like PWM and
+    // TC78H611FNG_Standby, so the object can live at file scope.
+    void applyDirectionOutput();
+
+    static void enableGpioClock(GPIO_TypeDef* port);
 };
 
 #endif /* TC78H611FNG_HPP_ */

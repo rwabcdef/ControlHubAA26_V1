@@ -82,6 +82,8 @@ PC6: TIM8_CH1  - CN12 pin4    -> IN1B (J10 pin 10)
 PC7: TIM8_CH2  - CN12 pin19   -> IN2B (J10 pin 8)
 PB8: GPIO      - CN12 pin3    -> nSTBY (J10 pin 6)
 PA6: TIM8_BKIN - CN12 pin13   -> (unconnected - reserved for an e-stop)
+PA15: GPIO out - CN11 pin17   -> motorB direction, to the current measurement
+                                 hardware (high = forward, low = reverse)
 
 PA6 note: the TIM8 break is armed (active high). A high on PA6 latches both
 motor PWM outputs (PC6/PC7) off until software restarts the PWM or the board
