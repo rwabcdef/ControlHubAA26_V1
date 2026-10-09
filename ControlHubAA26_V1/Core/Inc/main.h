@@ -79,6 +79,8 @@ void Error_Handler(void);
 /* Private defines -----------------------------------------------------------*/
 #define USER_Btn_Pin GPIO_PIN_13
 #define USER_Btn_GPIO_Port GPIOC
+#define TACHO_B_Pin GPIO_PIN_4
+#define TACHO_B_GPIO_Port GPIOF
 #define nRF24L01_nINT_Pin GPIO_PIN_5
 #define nRF24L01_nINT_GPIO_Port GPIOF
 #define nRF24L01_nINT_EXTI_IRQn EXTI9_5_IRQn
@@ -110,6 +112,8 @@ void Error_Handler(void);
 #define STLK_RX_GPIO_Port GPIOD
 #define STLK_TX_Pin GPIO_PIN_9
 #define STLK_TX_GPIO_Port GPIOD
+#define SD_CD_Pin GPIO_PIN_2
+#define SD_CD_GPIO_Port GPIOG
 #define USB_OverCurrent_Pin GPIO_PIN_7
 #define USB_OverCurrent_GPIO_Port GPIOG
 #define USB_ID_Pin GPIO_PIN_10
@@ -130,6 +134,8 @@ void Error_Handler(void);
 #define RMII_TXD0_GPIO_Port GPIOG
 #define LD2_Pin GPIO_PIN_7
 #define LD2_GPIO_Port GPIOB
+#define MOTOR_nSTBY_Pin GPIO_PIN_8
+#define MOTOR_nSTBY_GPIO_Port GPIOB
 
 /* USER CODE BEGIN Private defines */
 

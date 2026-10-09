@@ -51,11 +51,13 @@ error-prone; prefer the IDE's project properties.
 `Drivers/` tree. Hand edits in those files survive only inside `/* USER CODE BEGIN x */`
 … `/* USER CODE END x */` markers. Anything substantial belongs in the C++ layer instead.
 
-PB8 (motor `/STBY`), PF4 (tachoB input, EXTI4) and PG2 (SD card detect) are deliberately
-not claimed in the `.ioc` — `TC78H611FNG_Standby`, `Tachometer::init()` and `SdCard::init()`
-configure them at runtime, and `EXTI4_IRQHandler` is hand-written in `stm32f4xx_it.c`. For
-the same reason nothing stops a future CubeMX edit handing any of them to a peripheral; see
-the notes in `Core/Src/main_tasks.cpp`.
+PB8 (`MOTOR_nSTBY`), PA15 (`MOTORB_DIR`), PF4 (`TACHO_B`) and PG2 (`SD_CD`) are claimed in
+the `.ioc`, but their drivers (`TC78H611FNG_Standby`, `TC78H611FNG`, `Tachometer::init()`,
+`SdCard::init()`) still configure them at runtime, so the two must agree. PF4's **EXTI line4
+NVIC interrupt is deliberately left unticked**: `MX_GPIO_Init()` runs before `tachoB.init()`
+creates its edge queue, so `Tachometer::init()` enables the NVIC itself, and
+`EXTI4_IRQHandler` is hand-written in `stm32f4xx_it.c` `USER CODE 1`. Ticking it would
+generate a duplicate `EXTI4_IRQHandler` (link error).
 
 USER CODE blocks that matter and are easy to lose:
 

@@ -29,8 +29,8 @@ void SdCard::init()
     return;
   }
 
-  /* The pin is not in the .ioc, so MX_GPIO_Init() may not have clocked
-     its port. Harmless if it has. */
+  /* The pin may not be in the .ioc, so MX_GPIO_Init() may not have
+     clocked its port. Harmless if it has. */
   if(this->detectPort == GPIOA)      { __HAL_RCC_GPIOA_CLK_ENABLE(); }
   else if(this->detectPort == GPIOB) { __HAL_RCC_GPIOB_CLK_ENABLE(); }
   else if(this->detectPort == GPIOC) { __HAL_RCC_GPIOC_CLK_ENABLE(); }

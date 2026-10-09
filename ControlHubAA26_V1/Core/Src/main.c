@@ -782,7 +782,7 @@ static void MX_GPIO_Init(void)
 
   /*Configure GPIO pin Output Level */
   HAL_GPIO_WritePin(GPIOB, LD1_Pin|LD3_Pin|GPIO_PIN_4|GPIO_PIN_5
-                          |GPIO_PIN_6|LD2_Pin|GPIO_PIN_8, GPIO_PIN_RESET);
+                          |GPIO_PIN_6|LD2_Pin|MOTOR_nSTBY_Pin, GPIO_PIN_RESET);
 
   /*Configure GPIO pin Output Level */
   HAL_GPIO_WritePin(GPIOG, GPIO_PIN_6, GPIO_PIN_RESET);
@@ -795,6 +795,12 @@ static void MX_GPIO_Init(void)
   GPIO_InitStruct.Mode = GPIO_MODE_IT_RISING;
   GPIO_InitStruct.Pull = GPIO_NOPULL;
   HAL_GPIO_Init(USER_Btn_GPIO_Port, &GPIO_InitStruct);
+
+  /*Configure GPIO pin : TACHO_B_Pin */
+  GPIO_InitStruct.Pin = TACHO_B_Pin;
+  GPIO_InitStruct.Mode = GPIO_MODE_IT_RISING_FALLING;
+  GPIO_InitStruct.Pull = GPIO_NOPULL;
+  HAL_GPIO_Init(TACHO_B_GPIO_Port, &GPIO_InitStruct);
 
   /*Configure GPIO pin : nRF24L01_nINT_Pin */
   GPIO_InitStruct.Pin = nRF24L01_nINT_Pin;
@@ -810,9 +816,9 @@ static void MX_GPIO_Init(void)
   HAL_GPIO_Init(GPIOF, &GPIO_InitStruct);
 
   /*Configure GPIO pins : LD1_Pin LD3_Pin PB4 PB5
-                           PB6 LD2_Pin PB8 */
+                           PB6 LD2_Pin MOTOR_nSTBY_Pin */
   GPIO_InitStruct.Pin = LD1_Pin|LD3_Pin|GPIO_PIN_4|GPIO_PIN_5
-                          |GPIO_PIN_6|LD2_Pin|GPIO_PIN_8;
+                          |GPIO_PIN_6|LD2_Pin|MOTOR_nSTBY_Pin;
   GPIO_InitStruct.Mode = GPIO_MODE_OUTPUT_PP;
   GPIO_InitStruct.Pull = GPIO_NOPULL;
   GPIO_InitStruct.Speed = GPIO_SPEED_FREQ_LOW;
@@ -823,6 +829,12 @@ static void MX_GPIO_Init(void)
   GPIO_InitStruct.Mode = GPIO_MODE_INPUT;
   GPIO_InitStruct.Pull = GPIO_NOPULL;
   HAL_GPIO_Init(GPIOB, &GPIO_InitStruct);
+
+  /*Configure GPIO pin : SD_CD_Pin */
+  GPIO_InitStruct.Pin = SD_CD_Pin;
+  GPIO_InitStruct.Mode = GPIO_MODE_INPUT;
+  GPIO_InitStruct.Pull = GPIO_PULLUP;
+  HAL_GPIO_Init(SD_CD_GPIO_Port, &GPIO_InitStruct);
 
   /*Configure GPIO pin : PG6 */
   GPIO_InitStruct.Pin = GPIO_PIN_6;

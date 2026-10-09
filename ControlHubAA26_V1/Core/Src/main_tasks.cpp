@@ -510,11 +510,9 @@ Led ledBoardGreen(GPIOB, GPIO_PIN_0);
 // channel A (IN1A/IN2A, J10 pins 4 and 2) if a second TC78H611FNG is
 // added for it later.
 //
-// PB8 is ZIO D15 on CN7, next to PC6 (D16). It is not claimed in the
-// .ioc at all, so CubeMX never touches it and TC78H611FNG_Standby
-// configures it itself - but for the same reason nothing stops a future
-// CubeMX edit handing PB8 to a peripheral, so claim it there if this
-// becomes permanent.
+// PB8 is ZIO D15 on CN7, next to PC6 (D16). It is claimed in the .ioc
+// as GPIO_Output MOTOR_nSTBY, initial level low, so MX_GPIO_Init() holds
+// /STBY low from boot; TC78H611FNG_Standby re-applies the same setup.
 //
 // 1 kHz is well inside the TC78H611FNG's 500 kHz input rating and above
 // the audible whine of the slower options. Note that TIM8's period is
@@ -535,7 +533,7 @@ Led ledBoardGreen(GPIOB, GPIO_PIN_0);
 #define MOTORB_DIRECTION_PIN           MOTORB_DIR_Pin
 #define MOTORB_DIRECTION_FORWARD_HIGH  true
 
-TC78H611FNG_Standby motorStandby(GPIOB, GPIO_PIN_8);
+TC78H611FNG_Standby motorStandby(MOTOR_nSTBY_GPIO_Port, MOTOR_nSTBY_Pin);
 
 TC78H611FNG motorB(GPIOC, GPIO_PIN_6,   // IN1B, TIM8_CH1
                    GPIOC, GPIO_PIN_7,   // IN2B, TIM8_CH2
@@ -567,25 +565,26 @@ SerLink::Socket* motorSocket = nullptr;
 // radio nINT on EXTI5 or USER_Btn on EXTI13 - no demux, no pending bit
 // belonging to someone else.
 //
-// Like PB8, PF4 is not claimed in the .ioc, so CubeMX never touches it
-// and Tachometer::init() configures the pin and the NVIC at runtime. The
-// EXTI4_IRQHandler vector is hand written in stm32f4xx_it.c for the same
-// reason. Claim PF4 in the .ioc if this becomes permanent - and until
-// then nothing stops a future CubeMX edit handing it to a peripheral.
+// PF4 is claimed in the .ioc as GPIO_EXTI4 TACHO_B (both edges, no
+// pull), but its EXTI line4 NVIC interrupt is deliberately left
+// unticked: MX_GPIO_Init() runs before tachoB.init() creates the edge
+// queue, so Tachometer::init() enables the NVIC itself, once it is safe
+// to. That is why EXTI4_IRQHandler is hand written in stm32f4xx_it.c.
 //
 // TIM5 is the timebase: 32 bit, free running at Tachometer::TICK_HZ, with
 // no interrupt of its own - the edge ISR just reads CNT. It is otherwise
 // unused, and its being 32 bit is what keeps every interval a plain
 // unsigned subtraction. TIM2, the only other 32 bit timer, is already the
 // ADC trigger.
-#define TACHOB_PIN  GPIO_PIN_4
+#define TACHOB_PORT TACHO_B_GPIO_Port
+#define TACHOB_PIN  TACHO_B_Pin
 
 // The controlB period. 20 Hz is quick enough for speed control and slow
 // enough that several revolutions land in one update at working speed,
 // which is where the averaging in Tachometer::update() earns its keep.
 #define CONTROLB_PERIOD_MS 50
 
-Tachometer tachoB(TIM5, GPIOF, TACHOB_PIN);
+Tachometer tachoB(TIM5, TACHOB_PORT, TACHOB_PIN);
 
 // The CTRL0 status frame (speed, duty, current - see the CTRL0 notes)
 // goes out unsolicited while the motor runs, rather than being polled: the
@@ -878,10 +877,9 @@ HubApp hubApp(hubAppConfig);
 // The SPI names on the card header are the same contacts in SPI mode;
 // SDIO uses them as DAT3/CMD/DAT0.
 //
-// CD: PG2 is CN8 14, next to the SDIO group, and otherwise unused. Like
-// PB8 and PF4 it is not claimed in the .ioc - SdCard::init() configures
-// it - so nothing stops a future CubeMX edit handing it to a peripheral;
-// claim it there if this becomes permanent.
+// CD: PG2 is CN8 14, next to the SDIO group, and otherwise unused. It is
+// claimed in the .ioc as GPIO_Input SD_CD; SdCard::init() re-applies it
+// with the pull it needs (see SDCARD_DETECT_ACTIVE below).
 //
 // SDCARD_DETECT_ACTIVE is the level CD reads with a card in. Most sockets
 // switch CD to GND on insertion, hence GPIO_PIN_RESET, with SdCard::init()
@@ -891,8 +889,8 @@ HubApp hubApp(hubAppConfig);
 //
 // The bus extras CubeMX does not do - the pull-ups, the SDIO interrupt,
 // the 8 MHz clock - are in USER CODE blocks; see SdCard.hpp for where.
-#define SDCARD_DETECT_PORT    GPIOG
-#define SDCARD_DETECT_PIN     GPIO_PIN_2
+#define SDCARD_DETECT_PORT    SD_CD_GPIO_Port
+#define SDCARD_DETECT_PIN     SD_CD_Pin
 #define SDCARD_DETECT_ACTIVE  GPIO_PIN_RESET
 
 // sdCardTask wakes at least this often to poll the card detect pin (the
@@ -2833,9 +2831,9 @@ void startSerLink2Task(void *argument)
    FromISR call inside onIrq() is legal.
 
    EXTI4 fires for the motorB tachometer (PF4, both edges - the rising
-   one re-arms the input, see Tachometer.hpp). That pin is
-   not in the .ioc, so its vector is hand written in stm32f4xx_it.c and
-   Tachometer::init() sets the same priority 7, for the same reason.
+   one re-arms the input, see Tachometer.hpp). Its NVIC line is left
+   unticked in the .ioc, so its vector is hand written in stm32f4xx_it.c
+   and Tachometer::init() sets the same priority 7, for the same reason.
 
    extern "C" is mandatory: without it this compiles to a mangled symbol,
    HAL's __weak definition stays live, and the callback silently never

@@ -54,9 +54,9 @@
  * Card detect
  * -----------
  * The card socket's CD switch on a plain GPIO input, read by
- * isCardPresent(). The pin is not claimed in the .ioc (like PB8 and PF4,
- * see main_tasks.cpp), so init() configures it, with an internal pull
- * away from the active level so an open switch reads "absent".
+ * isCardPresent(). init() configures the pin itself, whatever the .ioc
+ * says, with an internal pull away from the active level so an open
+ * switch reads "absent".
  *
  * BSP_SD_Init() asks BSP_SD_IsDetected() before touching the card. The
  * generated one is a weak stub that always answers "present"; the strong

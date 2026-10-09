@@ -222,6 +222,16 @@ void Tachometer::onEdge()
      whatever latency got us here ends up in the timestamp. */
   uint32_t now = timebase->CNT;
 
+  /* The EXTI4 NVIC line is deliberately left disabled in the .ioc, so
+     only init() enables it, after creating the queue. If it is ever
+     ticked there, MX_GPIO_Init() enables it first, and an edge in that
+     window - a wheel still coasting after a reset - must be ignored,
+     not queued to a null handle. */
+  if(queue == nullptr)
+  {
+    return;
+  }
+
   /* A real magnet holds the line low for milliseconds; a spike coupled in
      from the motor PWM is gone within microseconds. By the time the ISR
      gets here - a microsecond or two after the edge - a real edge is

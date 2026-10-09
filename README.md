@@ -99,8 +99,8 @@ motorB current sense goes to PA3 (see Analog inputs below).
 PF4 (CN12 pin 38) # tachoB input pin (3144 Hall switch via level shifter, 2200pF to GND)
 GND (CN12 pin 39) # sensor return
 
-TIM5 is the tacho timebase. PF4 is not claimed in the .ioc - Tachometer::init()
-configures it at runtime.
+TIM5 is the tacho timebase. PF4 is GPIO_EXTI4 (TACHO_B) in the .ioc, with its
+NVIC line left unticked - Tachometer::init() enables the interrupt at runtime.
 #--------------------------------------------------------------------
 ## Analog inputs (ADC1, scanned continuously, paced by TIM2)
 
@@ -133,7 +133,7 @@ Card header pin -> CN8 pin:
 
 !! CN8 pin 9 is +5V - do NOT use it to power the card. !!
 
-PG2 is not claimed in the .ioc - SdCard::init() configures it at runtime. CD is
+PG2 is GPIO_Input (SD_CD) in the .ioc; SdCard::init() applies the pull-up. CD is
 taken as active low (card in = GND); if the status reads A with a card in, flip
 SDCARD_DETECT_ACTIVE in main_tasks.cpp. The SDIO bus runs at 8 MHz (ClockDiv 4,
 main.c USER CODE SDIO_Init 2) while on jumper wires. The card must be FAT/FAT32

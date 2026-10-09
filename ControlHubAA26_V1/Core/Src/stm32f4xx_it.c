@@ -283,17 +283,18 @@ void DMA2_Stream6_IRQHandler(void)
   * @brief This function handles EXTI line4 interrupt.
   *
   * PF4 is the motorB tachometer input - see the Tachometer block in
-  * main_tasks.cpp. The pin is not claimed in the .ioc, so CubeMX neither
-  * configures it nor generates this vector; Tachometer::init() does the
-  * GPIO and NVIC setup at runtime and this handler is hand written.
+  * main_tasks.cpp. PF4 is claimed in the .ioc (GPIO_EXTI4, TACHO_B), but
+  * its EXTI line4 NVIC interrupt is deliberately left unticked, so CubeMX
+  * does not generate this vector; Tachometer::init() enables the NVIC
+  * after creating its queue, and this handler is hand written.
   *
   * EXTI4 is a dedicated line, so there is nothing to demux here: the one
   * call clears the pending bit and dispatches to HAL_GPIO_EXTI_Callback()
   * in main_tasks.cpp, which routes GPIO_PIN_4 to Tachometer::onEdge().
   *
-  * If PF4 is ever added to the .ioc, CubeMX will generate its own
-  * EXTI4_IRQHandler and this becomes a duplicate symbol - a link error,
-  * not a silent conflict. Delete this block at that point.
+  * If EXTI line4 is ever ticked in the .ioc's NVIC, CubeMX will generate
+  * its own EXTI4_IRQHandler and this becomes a duplicate symbol - a link
+  * error, not a silent conflict. Delete this block at that point.
   */
 void EXTI4_IRQHandler(void)
 {
