@@ -91,7 +91,7 @@ is reset. PA6 has an internal pull-down (set in HAL_TIM_PWM_MspInit, USER CODE
 block), so leaving it unconnected is safe - but do not wire anything to CN12
 pin 13 that can drive it high. The TC78H611FNG has no fault output.
 
-motorB current sense goes to PA3 (see Analog inputs below).
+motorB current sense goes to PA5 (see Analog inputs below).
 
 #--------------------------------------------------------------------
 ## TachoB
@@ -105,9 +105,9 @@ NVIC line left unticked - Tachometer::init() enables the interrupt at runtime.
 ## Analog inputs (ADC1, scanned continuously, paced by TIM2)
 
 PA0: ADC1_IN0  (index 0)
-PA3: ADC1_IN3  (index 1) - motorB current sense
+PA3: ADC1_IN3  (index 1) - not used: driven (~0.6 V) by the main board's old sense path
 PA4: ADC1_IN4  (index 2)
-PA5: ADC1_IN5  (index 3)
+PA5: ADC1_IN5  (index 3) - motorB current sense, from the rectifier board's MCP6042 (CN12 pin 11)
 #--------------------------------------------------------------------
 ## Buttons
 

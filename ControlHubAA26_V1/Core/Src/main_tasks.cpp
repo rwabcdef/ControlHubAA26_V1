@@ -106,7 +106,7 @@ LIFT0U001015BI000000.000234   # ended short - with CTRL0 BGF reading 1, the
 # if they cease for 2 s). The hub sends it LED01: A0/A1/AF0002020 (Idle /
 # Control / Lift) and B0/B1 (forward / reverse selected).
 
-# Adc socket - ADC1, ranks IN0/IN3/IN4/IN5 (PA0/PA3/PA4/PA5). Channel 1 is the motorB current sense.
+# Adc socket - ADC1, ranks IN0/IN3/IN4/IN5 (PA0/PA3/PA4/PA5). Channel 3 (PA5) is the motorB current sense.
 ADC00T529002G1      # raw count, 4 digits
 ADC00T529002V1      # millivolts, 4 digits
 ADC00T529002GA      # all four channels, raw
@@ -650,11 +650,41 @@ static_assert((REMOTE_LED_REFRESH_MS % CONTROLB_PERIOD_MS) == 0,
 // a lift move runs at until CTRL0 BR<dddd> sets another.
 #define CONTROLB_BOOT_RPM           100U
 
-// motorB current: the PA3 sense voltage (adc1 channel 1, mV) times this
-// gives mA, for the CTRL0 status frame.
-// TODO: the real value, from the TC78H611FNG current sense / the board's
-// sense resistor. 1 reports the raw millivolts as mA until then.
-#define MOTORB_CURRENT_MA_PER_MV    1.0f
+// motorB current, for the CTRL0 status frame. PA5 (adc1 channel 3) comes
+// from the external rectifier board, not straight from the main board:
+//
+//   R12 (50 mR) -> INA240A2 U7 (x50, 2.5 mV/mA) -> board: +1 / -1 paths,
+//   2N7000 mux selected by MOTORB_DIR, x5.26 gain stage -> PA5
+//
+// U7's REF1/REF2 straddle VSB, so its output idles at mid-rail and swings
+// either way with direction. The board folds the swing to one side but
+// keeps the mid-rail offset, so PA5 idles at ~1730 mV, not 0 (and reaches
+// ~2300 mV at stall). The offset is taken off here instead:
+//
+//   mA = max(0, mV - zero) * MOTORB_CURRENT_MA_PER_MV
+//
+// The zero is re-measured whenever motorB has sat at 0% for
+// MOTORB_CURRENT_ZERO_SETTLE_MS (updateMotorBCurrentZero(), controlBTask),
+// so it follows the 3.3 V rail the offset is derived from.
+// MOTORB_CURRENT_ZERO_MV is only the boot value, until the first one.
+// A reading outside MOTORB_CURRENT_ZERO_MIN_MV..MAX_MV is not taken as a
+// zero (board unplugged, say), and the previous zero stands.
+#define MOTORB_CURRENT_ZERO_MV         1730U
+#define MOTORB_CURRENT_ZERO_MIN_MV     1400U
+#define MOTORB_CURRENT_ZERO_MAX_MV     2000U
+
+// Long enough for the motor to spin down and adc1 to publish a fresh
+// average (100 ms).
+#define MOTORB_CURRENT_ZERO_SETTLE_MS  1000U
+
+static_assert((MOTORB_CURRENT_ZERO_SETTLE_MS % CONTROLB_PERIOD_MS) == 0,
+  "MOTORB_CURRENT_ZERO_SETTLE_MS must be a whole number of controlB periods");
+
+// In theory 1 / (2.5 mV/mA * the board's gain from U7 OUT to PA5).
+// TODO: calibrate - motor in series with a meter at a steady duty, then
+// meter mA / (ADC00 V1 reading - zero). 1 reports the millivolts above
+// the zero as mA until then.
+#define MOTORB_CURRENT_MA_PER_MV       1.0f
 
 // Controller has its own direction type so it does not depend on the
 // motor driver; these translate for the TC78H611FNG. Written out for
@@ -760,15 +790,21 @@ SerLink::Socket* controlMqttSocket = nullptr;
 //
 //   index  rank  ADC channel  pin
 //   0      1     IN0          PA0
-//   1      2     IN3          PA3   motorB current sense
+//   1      2     IN3          PA3   (old motorB sense, main board - not used)
 //   2      3     IN4          PA4
-//   3      4     IN5          PA5
+//   3      4     IN5          PA5   motorB current sense
 //
-// PA3 carries the TC78H611FNG current sense through a 10k/0.47u RC on the
-// board (fc ~34 Hz), so the 1 kHz PWM chop is already filtered out and the
-// ADC sees the average. That filter settles in about 40 ms, which is fine
-// for monitoring but far too slow for protection - fast overcurrent trip
-// belongs on TIM8_BKIN (PA6), not here.
+// PA5 carries motorB's current sense: the INA240 via the rectifier board
+// (see MOTORB_CURRENT_MA_PER_MV), wired straight from the board's MCP6042
+// output. It moved off PA3 because something on the main board drives PA3
+// (~0.6 V, through the old 10k/0.47u RC) and out-pulls the MCP6042.
+//
+// PA5 has no RC, so the ADC sees whatever PWM ripple the motor winding
+// and the MCP6042 (~3 kHz at gain 5) leave. The 1 kHz PWM sampled at
+// 320 Hz aliases to 40 Hz, and each 100 ms average spans exactly four of
+// those cycles, so the ripple averages out. Fine for monitoring, far too
+// slow for protection - fast overcurrent trip belongs on TIM8_BKIN (PA6),
+// not here.
 //
 // TIM2 paces the scans at 320 Hz (84 MHz / 2625 / 100). Each half buffer is
 // 32 scans, so a set of averages is published every 100 ms - 10 Hz out of
@@ -783,7 +819,37 @@ extern TIM_HandleTypeDef htim2;   // main.c, the 320 Hz TRGO source
 
 Adc adc1(&hadc1, &htim2, ADC1_NUM_CHANNELS);
 
-#define ADC1_MOTORB_CURRENT_CHANNEL 1U   // PA3, see the table above
+#define ADC1_MOTORB_CURRENT_CHANNEL 3U   // PA5, see the table above
+
+// PA5's reading at zero current, mV - see MOTORB_CURRENT_MA_PER_MV.
+// Written only by controlBTask (updateMotorBCurrentZero()); a 16-bit
+// aligned store is atomic on the M4, so any task may read it.
+static volatile uint16_t motorBCurrentZeroMv = MOTORB_CURRENT_ZERO_MV;
+
+// controlBTask only, once per CONTROLB_PERIOD_MS.
+static void updateMotorBCurrentZero()
+{
+  static uint32_t idleMs = 0U;
+
+  if(motorB.getPercent() != 0U)
+  {
+    idleMs = 0U;
+    return;
+  }
+
+  if(idleMs < MOTORB_CURRENT_ZERO_SETTLE_MS)
+  {
+    idleMs += CONTROLB_PERIOD_MS;
+    return;
+  }
+
+  /* Settled: keep re-measuring for as long as the motor stays off. */
+  const uint16_t mv = adc1.getMillivolts(ADC1_MOTORB_CURRENT_CHANNEL);
+  if((mv >= MOTORB_CURRENT_ZERO_MIN_MV) && (mv <= MOTORB_CURRENT_ZERO_MAX_MV))
+  {
+    motorBCurrentZeroMv = mv;
+  }
+}
 
 // Acquired on transport0 (uart2), alongside the motor socket.
 SerLink::Socket* adcSocket = nullptr;
@@ -840,8 +906,13 @@ static const HubAppConfig hubAppConfig =
   &liftB,
   []() -> uint16_t                                        // getCurrentMa
   {
-    float ma = (float)adc1.getMillivolts(ADC1_MOTORB_CURRENT_CHANNEL) *
-               MOTORB_CURRENT_MA_PER_MV;
+    const uint16_t mv = adc1.getMillivolts(ADC1_MOTORB_CURRENT_CHANNEL);
+    const uint16_t zero = motorBCurrentZeroMv;
+    if(mv <= zero)
+    {
+      return 0U;
+    }
+    float ma = (float)(mv - zero) * MOTORB_CURRENT_MA_PER_MV;
     return (ma > 65535.0f) ? 65535U : (uint16_t)(ma + 0.5f);
   },
   sendLiftDone,
@@ -2252,6 +2323,9 @@ void startAdcTask(void *argument)
 // and controllerB (which it runs) and the status frame all see this
 // pass's reading. This is hubApp's owning task, and so liftB's and
 // controllerB's - see Threading in HubApp.hpp.
+//
+// updateMotorBCurrentZero() re-takes PA5's zero-current reading while
+// motorB is off - see MOTORB_CURRENT_MA_PER_MV.
 void startControlBTask(void *argument)
 {
   TickType_t xLastWakeTime = xTaskGetTickCount();
@@ -2262,6 +2336,8 @@ void startControlBTask(void *argument)
     tachoB.update();
 
     hubApp.run();
+
+    updateMotorBCurrentZero();
 
     vTaskDelayUntil(&xLastWakeTime, xFrequency);
   }

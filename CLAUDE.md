@@ -270,9 +270,13 @@ own next build. Until then a shell `make` will not compile or link it.
   finish. The target boots at `CONTROLB_BOOT_RPM` (100). `liftB.run()` also runs the
   controller (in Control runs too), and `hubApp.run()` calls it.
 - **`Adc`** — ADC1 scans PA0/PA3/PA4/PA5 by DMA into a circular buffer, triggered by TIM2,
-  and averages each half buffer. PA3 is the motorB current sense, which is RC-filtered on
-  the board — fine for monitoring, too slow for overcurrent protection. The status frame
-  reports it as mA via `MOTORB_CURRENT_MA_PER_MV`.
+  and averages each half buffer. PA5 (index 3) is the motorB current sense — fine for
+  monitoring, too slow for overcurrent protection. It comes straight from an external
+  rectifier board fed by the INA240 (U7), and idles at about 1730 mV, not 0. Don't move it
+  back to PA3: the main board drives PA3 (~0.6 V) and out-pulls the board's MCP6042. The
+  status frame reports `(mV − zero) × MOTORB_CURRENT_MA_PER_MV` as mA, and the PC app takes
+  mA as-is. `updateMotorBCurrentZero()` (in controlBTask) re-measures the zero once motorB
+  has been at 0% for `MOTORB_CURRENT_ZERO_SETTLE_MS`.
 
 `STATUS_PUBLISH_PERIOD_MS` and `REMOTE_LED_REFRESH_MS` must be whole multiples of
 `CONTROLB_PERIOD_MS` (enforced by `static_assert`s).
