@@ -211,8 +211,10 @@ Two shared-state gotchas:
 PWM + one GPIO), so a direction change is two `setPercent()` calls with no pin-mode glitch.
 `/STBY` is device-wide and lives in a separate `TC78H611FNG_Standby` shared by both channels.
 Bring-up order matters: park the IN pins low, *then* `enable()` standby. TIM8's break
-input (PA6) is armed, so a high on PA6 latches motorB's outputs off; nothing is wired
-to it yet (see the CubeMX section).
+input (PA6) is armed, so a high on PA6 latches motorB's outputs off (and any other TIM8
+channel). It is meant for the current board's overcurrent comparator (0.5 A, or 0.4 A
+selected by a spare GPIO still to be assigned), which is designed but not built yet.
+README.md "MotorB current measurement" has the schematic; see also the CubeMX section.
 
 ### Hub mode: `HubApp`
 
@@ -272,7 +274,8 @@ own next build. Until then a shell `make` will not compile or link it.
 - **`Adc`** — ADC1 scans PA0/PA3/PA4/PA5 by DMA into a circular buffer, triggered by TIM2,
   and averages each half buffer. PA5 (index 3) is the motorB current sense — fine for
   monitoring, too slow for overcurrent protection. It comes straight from an external
-  rectifier board fed by the INA240 (U7), and idles at about 1730 mV, not 0. Don't move it
+  rectifier board fed by the INA240 (U7; schematic in README.md), and idles at about
+  1730 mV, not 0. Don't move it
   back to PA3: the main board drives PA3 (~0.6 V) and out-pulls the board's MCP6042. The
   status frame reports `(mV − zero) × MOTORB_CURRENT_MA_PER_MV` as mA, and the PC app takes
   mA as-is. `updateMotorBCurrentZero()` (in controlBTask) re-measures the zero once motorB

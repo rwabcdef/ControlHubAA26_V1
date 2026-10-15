@@ -1,0 +1,24 @@
+
+
+-----------------------------------------------------------------------------------------
+## Logger
+
+Save motor running data values (rpm etc.) to log file on sd card.
+
+-----------------------------------------------------------------------------------------
+## Relay remote commands to PC app
+
+So that remote commands (start motor etc.) can be seen on PC app.
+
+-----------------------------------------------------------------------------------------
+## Control Hub 16x2 screen
+
+Render app state on local screen
+-----------------------------------------------------------------------------------------
+## MotorB BKIN input
+
+Use remaining (currently unused) opamp in 2nd MCP6042, as a comparator,
+to trigger motorB's BKIN (break input) when the current is above a certain threshold.
+Use hysteresis resistor.
+-----------------------------------------------------------------------------------------
+-----------------------------------------------------------------------------------------
