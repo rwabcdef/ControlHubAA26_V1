@@ -48,4 +48,5 @@ $RECYCLE.BIN/
 .DS_Store
 
 # ---- Tooling ----
-.claude/
+.claude/settings.local.json
+__pycache__/
