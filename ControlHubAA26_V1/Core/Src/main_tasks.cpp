@@ -79,7 +79,8 @@ CTRL0T529003BGA     # all: gain.target.measured RPM
 
 # Sent by the board on MQTT only, every STATUS_PUBLISH_PERIOD_MS while running
 # and once when the run ends ('U', so no ack):
-CTRL0U001015CF030.0350.1234  # Control, forward, duty 30%, 350 RPM, 1234 mA
+CTRL0U001020CF030.0350.1234.0150  # Control, forward, duty 30%, 350 RPM, 1234 mA,
+                                  # run target 150 RPM (the pot's in a remote run)
 
 # Lift socket - liftB, over MQTT only (SerLink2: publish to hub/aa26/serlink/down).
 # Direction and distance only - distance in tachoB edges (2 per rev). The speed
@@ -1759,13 +1760,15 @@ bool motorSockInstantHandler(SerLink::Frame &rxFrame, uint16_t* dataLen, char* d
 //   expected), every STATUS_PUBLISH_PERIOD_MS while a Control run or a
 //   lift move is in progress, and once more when it ends:
 //
-//     CTRL0U001015CF030.0350.1234
+//     CTRL0U001020CF030.0350.1234.0150
 //
 //     <I|C|L>   mode: Idle, Control, Lift
 //     <F|R>     direction - the run's, or the selected one while Idle
 //     <ddd>     motorB duty, percent
 //     <dddd>    tachoB speed, RPM, clamped at 9999
 //     <dddd>    motorB current, mA (MOTORB_CURRENT_MA_PER_MV), clamped
+//     <dddd>    the run's target speed, RPM - the remote's pot in a run the
+//               remote started, else the target (BR); see HubApp::runRpm()
 //
 // <controller> is resolved by controllerForSelector(), so it follows the
 // MOTOR socket's selectors: only controllerB exists, and 'A' reaches it

@@ -235,7 +235,8 @@ a set sees it. The rules:
   ignore it.
   Every remote frame is a sign of life; a remote-started run stops after
   `REMOTE_HEARTBEAT_TIMEOUT_MS` (2 s) of silence. PC-started runs carry on.
-- `hubApp` sends the CTRL0 status frame (`<I|C|L><F|R><duty>.<rpm>.<mA>`, MQTT only)
+- `hubApp` sends the CTRL0 status frame (`<I|C|L><F|R><duty>.<rpm>.<mA>.<target>`, MQTT only;
+  `<target>` is the run's, so the pot's in a remote run)
   every `STATUS_PUBLISH_PERIOD_MS` while running and once on reaching Idle, and LED01 to
   the remote on change and every second.
 - MOTOR `P`/`D` drive the bridge directly as a debug path and are refused unless Idle.

@@ -315,6 +315,8 @@ void HubApp::writeStatus(char* dst) const
   if(rpm > 9999U) { rpm = 9999U; }
   uint32_t currentMa = config.getCurrentMa();
   if(currentMa > 9999U) { currentMa = 9999U; }
+  uint32_t runTarget = runRpm();
+  if(runTarget > 9999U) { runTarget = 9999U; }
 
   dst[0] = modeToChar(currentMode);
   dst[1] = (dir == ControllerDirection::reverse) ? 'R' : 'F';
@@ -323,6 +325,8 @@ void HubApp::writeStatus(char* dst) const
   writeDigits(rpm, 4U, &dst[6]);
   dst[10] = '.';
   writeDigits(currentMa, 4U, &dst[11]);
+  dst[15] = '.';
+  writeDigits(runTarget, 4U, &dst[16]);
 }
 
 void HubApp::sendStatus()

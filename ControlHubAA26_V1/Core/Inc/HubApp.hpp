@@ -168,8 +168,12 @@ class HubApp
 
     // The CTRL0 status frame's data, STATUS_LEN chars, no NUL:
     //   <mode I|C|L><dir F|R><duty ddd>.<measured rpm dddd>.<current mA dddd>
-    // e.g. CF030.0350.1234. Getters only, so any task.
-    static const uint8_t STATUS_LEN = 15U;
+    //   .<run target rpm dddd>
+    // e.g. CF030.0350.1234.0150. The run target is runRpm(): the pot's in a
+    // run the remote started (once heard from), else the target speed - so
+    // the PC can show the speed of a run it does not set. Getters only, so
+    // any task.
+    static const uint8_t STATUS_LEN = 20U;
     void writeStatus(char* dst) const;
 
     static char modeToChar(mode m);

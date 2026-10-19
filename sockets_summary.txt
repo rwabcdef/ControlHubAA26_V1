@@ -73,8 +73,10 @@ Reads ('T', answered in the ack data):
   BGA -> dddddd.dddd.dddd          gain . target RPM . measured RPM
 
 Status (hub -> PC, 'U', MQTT only; every 250 ms while running, once on reaching Idle):
-  <I|C|L><F|R><ddd>.<dddd>.<dddd>  mode, direction, duty %, measured RPM, current mA
-  e.g. CTRL0U001015CF030.0350.1234
+  <I|C|L><F|R><ddd>.<dddd>.<dddd>.<dddd>
+                                   mode, direction, duty %, measured RPM, current mA,
+                                   run target RPM (the remote's pot in a remote run)
+  e.g. CTRL0U001020CF030.0350.1234.0150
 
 ------------------------------------------------------------------------------
 LIFT0 - hub <-> PC (MQTT only). Selector B (liftB).
