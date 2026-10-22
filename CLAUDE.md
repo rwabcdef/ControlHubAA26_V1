@@ -169,11 +169,11 @@ Layers, bottom to top (`Frame` ↔ `Reader`/`Writer` ↔ `Transport` ↔ `Socket
   acquire past the limit returns a silent `nullptr`, so every socket pointer is checked
   before use. transport0 (uart2) holds MOTOR, CTRL0, ADC00, SDC00 and DBG00 (the last
   acquired from serLink0Task); transport1 (radio) holds LED01, BTN01, POT01, HBT01 and
-  DBG00; transport2 (MQTT) holds DBG00, CTRL0 and LIFT0. `sockets_summary.txt` at the
+  DBG00; transport2 (MQTT) holds DBG00, CTRL0, MOTOR and LIFT0. `sockets_summary.txt` at the
   repo root lists every socket and its frames.
   A socket belongs to one transport, but a handler does not — the same handler functions
   can back sockets on several transports (CTRL0 on uart2 and MQTT post to the same
-  `hubApp`).
+  `hubApp`; MOTOR on both drives the same bridge).
 
 The two handler kinds matter and are easy to confuse:
 
@@ -275,6 +275,8 @@ a set sees it. The rules:
   every `STATUS_PUBLISH_PERIOD_MS` while running and once on reaching Idle, and LED01 to
   the remote on change and every second.
 - MOTOR `P`/`D` drive the bridge directly as a debug path and are refused unless Idle.
+  The PC apps' Direct page uses them over MQTT (a duty dial and a direction switch per
+  motor; A is shown disabled until motorA exists).
 
 `HubApp.cpp` is a new file in an existing folder, so it needs no `.cproject` edit — but
 CubeIDE only lists it in `Debug/Core/Src/subdir.mk` and `Debug/objects.list` after its
@@ -362,7 +364,7 @@ LIFT0 exists only on SerLink2, so it has to go over MQTT (`mosquitto_pub` to
 The console also shows an **event echo**: `logEvent()` in `main_tasks.cpp` repeats the
 user-driven, low-rate frames from MQTT and the radio as DBG00 `'U'` frames whose data is
 `<protocol> <data>` (e.g. `DBG00U123008BTN01 1P`) — BTN01, POT01 and LED01 on a change,
-CTRL0 sets/commands over MQTT, LIFT0 commands and the done frame. The status frame, reads
+CTRL0 and MOTOR sets/commands over MQTT, LIFT0 commands and the done frame. The status frame, reads
 (`BG*`, `BT`), HBT01 and the LED01 refresh are deliberately left out.
 
 ## Conventions

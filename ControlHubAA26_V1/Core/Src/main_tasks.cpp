@@ -382,6 +382,7 @@ bool debugSockInstantHandler(SerLink::Frame &rxFrame, uint16_t* dataLen, char* d
 // MOTOR socket handlers - the command set is documented above their
 // implementations, below startMotorTask().
 void motorSockReceiveHandler(const char* data, uint16_t dataLen);
+void motorMqttSockReceiveHandler(const char* data, uint16_t dataLen);
 bool motorSockInstantHandler(SerLink::Frame &rxFrame, uint16_t* dataLen, char* data);
 
 // CTRL0 socket handlers - speed controller commands, documented above
@@ -542,9 +543,11 @@ TC78H611FNG motorB(GPIOC, GPIO_PIN_6,   // IN1B, TIM8_CH1
                    MOTORB_DIRECTION_PORT, MOTORB_DIRECTION_PIN,
                    MOTORB_DIRECTION_FORWARD_HIGH);
 
-// Acquired on transport0 (uart2), so motor commands arrive over the
-// serial link rather than the radio.
+// MOTOR - direct motor commands. Two sockets, one per link, sharing the
+// same handlers (see the MOTOR section): uart2 for the serial console,
+// MQTT for the PC app's Direct page.
 SerLink::Socket* motorSocket = nullptr;
+SerLink::Socket* motorMqttSocket = nullptr;
 
 //--------------------------------------------------------------
 // motorB tachometer - a wheel carrying two magnets, read by a 3144 Hall
@@ -863,6 +866,7 @@ SerLink::Socket* adcSocket = nullptr;
 //   DBG00U<rrr>008BTN01 1P      remote button 1 pressed
 //   DBG00U<rrr>009POT01 P050    remote pot moved to 50% (on a change only)
 //   DBG00U<rrr>012CTRL0 BR0120  CTRL0 set or command from the PC (MQTT)
+//   DBG00U<rrr>011MOTOR BP030   MOTOR set from the PC (MQTT)
 //   DBG00U<rrr>013LIFT0 BSF234  LIFT0 command from the PC
 //   DBG00U<rrr>021LIFT0 BI000234.000234  LIFT0 done frame, hub -> PC
 //   DBG00U<rrr>008LED01 A1      LED01 to the remote, on a change only
@@ -1244,6 +1248,11 @@ void initTasks()
   controlMqttSocket = transport2.acquireSocket("CTRL0", controlMqttSockReceiveHandler,
     controlSockInstantHandler);
 
+  /* The same handlers as uart2's MOTOR, with the sets echoed to the
+     serial console first, as CTRL0's are. For the PC app's Direct page. */
+  motorMqttSocket = transport2.acquireSocket("MOTOR", motorMqttSockReceiveHandler,
+    motorSockInstantHandler);
+
   /* Commands in serLink2Task, posted on to hubApp; the status read on the
      ack, from reader2Task. */
   liftMqttSocket = transport2.acquireSocket("LIFT0", liftSockReceiveHandler,
@@ -1434,7 +1443,8 @@ void startMotorTask(void *argument)
 }
 
 //--------------------------------------------------------------
-// MOTOR socket - motor control over SerLink0 (uart2).
+// MOTOR socket - motor control over SerLink0 (uart2) and SerLink2 (MQTT,
+// the PC app's Direct page).
 //
 // Frame data is <selector><command><args>, on top of SerLink's usual
 // 12 character header (5 protocol, 1 type, 3 roll code, 3 data length):
@@ -1562,8 +1572,8 @@ static bool readUintField(const char* src, uint8_t width, uint32_t* value)
   return true;
 }
 
-// The sets. Runs in serLink0Task, from Transport::run(), which for a 'T'
-// frame is after the ack has already gone out - so a malformed command is
+// The sets. Runs in serLink0Task or serLink2Task, from Transport::run(),
+// which for a 'T' frame is after the ack has already gone out - so a malformed command is
 // dropped silently rather than reported. Use the reads to confirm what
 // actually landed.
 void motorSockReceiveHandler(const char* data, uint16_t dataLen)
@@ -1579,7 +1589,7 @@ void motorSockReceiveHandler(const char* data, uint16_t dataLen)
     return;
   }
 
-  /* The mode check for P and D. Read here, in serLink0Task, while hubApp
+  /* The mode check for P and D. Read here, in a serLink task, while hubApp
      changes it in controlBTask - so a start landing in the same moment can
      slip past. Acceptable on a debug path; everything that matters goes
      through hubApp's queue. */
@@ -1650,8 +1660,20 @@ void motorSockReceiveHandler(const char* data, uint16_t dataLen)
   }
 }
 
-// The reads. Runs in reader0Task, before the ack is sent, so what it
-// writes here rides back on that ack.
+// MOTOR over MQTT: echo, then the same as uart2's. Reads never get here -
+// they are answered on the ack - so only sets are echoed.
+//
+// Two links can now drive the bridge, from two serLink tasks, with nothing
+// between them - the same race as the mode check above, accepted for the
+// same reason: a debug path, used from one place at a time.
+void motorMqttSockReceiveHandler(const char* data, uint16_t dataLen)
+{
+  logEvent("MOTOR", data, dataLen);
+  motorSockReceiveHandler(data, dataLen);
+}
+
+// The reads. Runs in reader0Task or reader2Task, before the ack is sent,
+// so what it writes here rides back on that ack.
 //
 // The handler is registered per protocol, so it sees the sets too.
 // Returning false for those leaves the ack as a plain ACK_OK, which is
