@@ -266,3 +266,97 @@ SDCARD_DETECT_ACTIVE in main_tasks.cpp. The SDIO bus runs at 8 MHz (ClockDiv 4,
 main.c USER CODE SDIO_Init 2) while on jumper wires. The card must be FAT/FAT32
 (exFAT is off). Driven by the SDC00 socket over uart2 - see main_tasks.cpp.
 #--------------------------------------------------------------------
+## File System (SDC00 socket, serial console only)
+
+The SD card is read and written by typing SDC00 frames into the serial
+console (USART2, 115200, CR+LF). Commands go as 'T' frames: SDC00T<rrr><len><data>,
+where <rrr> is any 3 digit roll code and <len> is the data length, 3 digits.
+<rr> in every answer is the FatFs result code, 2 digits (table below).
+
+# Status
+S<P|A><M|U><R|W|C>.<rr>
+  P / A   card Present / Absent (the card detect pin, PG2)
+  M / U   volume Mounted / Unmounted
+  R/W/C   a file open for Reading / Writing, or Closed (none open)
+  rr      the last FatFs result
+
+SDC00T560001S             -> SDC00A560007SPMC.00   read it (answered on the ack)
+SDC00U000007SPMC.00          sent by the board: card inserted and mounted OK
+SDC00U000007SPUC.13          sent by the board: card seen, but no FAT volume
+SDC00U000007SAUC.03          sent by the board: card removed
+
+# Reading a file - open, read, close
+SDC00T561009OTEST.TXT     -> O<rr>.<size, 10 digits>   open an existing file, read only
+                             SDC00U...014O00.0000000013
+                             SDC00U...014O04.0000000000   no such file
+SDC00T562007R0.0100       -> read 100 bytes from offset 0
+                             R<offset, 1..9 digits>.<length, 1..4 digits>, 512 bytes at most.
+                             The data comes back as D frames, then R<rr>.<bytes read>:
+                             SDC00U...018DHello world\0D\0A
+                             SDC00U...008R00.0013
+                             Reading past the end returns fewer bytes, rr still 00.
+SDC00T563001C             -> C<rr>   close
+
+D frame data: printable ASCII as is, '\' as '\\', any other byte as '\' + 2 hex
+digits (\0D\0A is CR LF), so binary files survive and text stays readable.
+
+# Writing a file - open, lines, close
+W<mode><path>, mode:
+  O  overwrite - create it, or empty an existing one
+  A  append    - create it, or add to the end of an existing one
+  N  new       - create it; W08 if it is already there
+
+SDC00T565009WOTEST.TXT    -> W<rr>.<size>   the size it was opened at (append: its old size)
+SDC00T566012LHello world  -> L<rr>.<new size>   write the text, then CR LF
+SDC00T566001L             -> a blank line
+SDC00T567010PPart one     -> P<rr>.<new size>   text only, no line end
+SDC00T566011L, part two      ...so P pieces then a final L make one line longer than
+                             a frame: here "Part one, part two"
+SDC00T563001C             -> C00   close - always close before pulling the card
+
+The text is written exactly as sent (no escapes), so <len> must count the
+command letter plus the text: L + "Hello world" is 012. A frame carries 64 data
+characters at most, so a line piece is 63. Each L / P is synced to the card
+before it is answered, so an answered line survives the card being pulled or
+the power going - but send the next line only once the last is answered. If
+the board's command queue is full it answers Q + the command letter (e.g. QL):
+that command was dropped, so send it again.
+
+# Listing files
+SDC00T568001F             -> list the root folder
+SDC00T569005FLOGS         -> list the LOGS folder (F05 if there is no such folder)
+One N frame per entry, folders included, then F<rr>.<count, 5 digits>:
+  N<F|D><size, 10 digits>.<name>   F = file, D = folder (size 0)
+                             SDC00U...021NF0000000013.TEST.TXT
+                             SDC00U...038ND0000000000.System Volume Information
+                             SDC00U...009F00.00002
+A name over 51 characters is sent as its 8.3 short name (e.g. LONGFI~1.TXT),
+which opens the same file. Not recursive - list a folder by name to see inside.
+Reading the folder takes a few ms; the frames are paced 20 ms apart, so 50
+entries take about a second. Other SD commands wait until it has finished.
+A file open for writing shows its size as of its last line written.
+
+# Rules
+- One file open at a time: O or W closes any file already open first.
+- R on a write file, or L / P on a read file, gives rr 07; with no file open, 09.
+- Paths: long file names are allowed; a folder in the path must already exist
+  (there is no command to make one). O / W + path must fit in one frame.
+- O and W mount the card first if needed.
+
+# Diagnostics
+SDC00T564001E             -> SDC00A564015E00000008.00041
+                             E<HAL SD error bits, hex>.<last mount time, ms>
+  00000001 command CRC fail      00000008 data timeout
+  00000002 data CRC fail         00000020 RX overrun
+  00000004 command timeout       40000000 DMA transfer error
+The error bits describe the most recent transfer - use them when a command
+answers 01 (disk error).
+
+# FatFs result codes (rr)
+  00 OK                          07 denied - wrong open mode, or card / folder full
+  01 disk error (see E above)    08 already exists (W with mode N)
+  03 not ready - no card         09 invalid object - no file open
+  04 no such file                10 write protected
+  05 no such folder              13 no FAT volume - format the card FAT32
+  06 invalid name                   (exFAT and NTFS are not supported)
+#--------------------------------------------------------------------

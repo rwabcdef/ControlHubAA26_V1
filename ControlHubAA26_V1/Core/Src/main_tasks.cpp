@@ -165,6 +165,18 @@ SDC00T566011L, part two    # longer than one frame (63 characters), send P
                            # pieces, then L with the last piece. -> P<rr>.<size>
                            # Here the line is "Part one, part two".
 SDC00T563001C              # close -> C00
+
+# Listing a folder - F alone for the root, F<path> for a folder in it.
+# One N frame per entry, folders included, then F<rr>.<count, 5 digits>:
+#   N<F|D><size, 10 digits>.<name>   F file / D folder (size 0)
+SDC00T568001F              # -> SDC00U...021NF0000000013.TEST.TXT
+                           #    SDC00U...038ND0000000000.System Volume Information
+                           #    SDC00U...009F00.00002
+SDC00T569005FLOGS          # the LOGS folder; F05 if there is no such folder
+# A name too long for the frame (over 51 characters) is sent as its 8.3
+# short name, which opens the same file. Not recursive. Each entry is a
+# frame, paced at SDCARD_FRAME_GAP_MS, so 50 entries take about a second;
+# reading the folder itself is a few ms.
 #
 # Each L/P is synced to the card before it is answered (SDCARD_SYNC_EACH_WRITE),
 # so an answered line survives the card being pulled. The text is written
@@ -1000,13 +1012,13 @@ SdCard sdCard(&hsd, &SDFatFS, SDPath,
 // overwritten by the next command before it is used.
 struct SdCmd
 {
-  enum op_t : uint8_t { open, openWrite, read, writeLine, writeText, close };
+  enum op_t : uint8_t { open, openWrite, read, writeLine, writeText, close, list };
 
   op_t              op;
   SdCard::WriteMode mode;                          // openWrite
   uint32_t          offset;                        // read
   uint32_t          len;                           // read: bytes; write*: text length
-  char              text[SerLink::Frame::MAX_DATALEN];  // open*: path, NUL
+  char              text[SerLink::Frame::MAX_DATALEN];  // open*, list: path, NUL
                                                    // terminated; write*: the text
 };
 
@@ -2385,6 +2397,8 @@ void startControlBTask(void *argument)
 #define SDCARD_SIZE_WIDTH       10U   // a uint32_t file size
 #define SDCARD_OFFSET_MAX_WIDTH 9U    // so a typed offset cannot overflow
 #define SDCARD_LEN_MAX_WIDTH    4U    // SDCARD_READ_MAX fits in 4 digits
+#define SDCARD_COUNT_WIDTH      5U    // F<rr>.<count> - a FAT folder holds at most 65536
+#define SDCARD_ENTRY_HEAD_LEN   (2U + SDCARD_SIZE_WIDTH + 1U)   // N<F|D><size>.
 
 static_assert(SDCARD_READ_MAX <= 9999U,
   "SDC00 read lengths are 4 digits on the wire");
@@ -2508,6 +2522,31 @@ static void sendSdResultAndSize(char letter, FRESULT result)
   sdSend(reply, (uint16_t)sizeof(reply));
 }
 
+// sdCardTask only, from listDir(). N<F|D><size>.<name> - one folder entry.
+// A long name that will not fit goes as its 8.3 short name, which opens
+// the same file, rather than cut short, which would not.
+static void sendSdEntry(const SdCard::DirEntry& entry, void* /*context*/)
+{
+  static const uint16_t nameRoom =
+    (uint16_t)(SerLink::Frame::MAX_DATALEN - SDCARD_ENTRY_HEAD_LEN);
+
+  const char* name = entry.name;
+  uint16_t nameLen = (uint16_t)strlen(name);
+  if(nameLen > nameRoom)
+  {
+    name = entry.shortName;
+    nameLen = (uint16_t)strlen(name);
+  }
+
+  char frameData[SerLink::Frame::MAX_DATALEN];
+  frameData[0] = 'N';
+  frameData[1] = entry.isDir ? 'D' : 'F';
+  writeUintField(entry.size, SDCARD_SIZE_WIDTH, &frameData[2]);
+  frameData[2U + SDCARD_SIZE_WIDTH] = '.';
+  memcpy(&frameData[SDCARD_ENTRY_HEAD_LEN], name, nameLen);
+  sdSend(frameData, (uint16_t)(SDCARD_ENTRY_HEAD_LEN + nameLen));
+}
+
 // sdCardTask only - carries out one command and sends its answer.
 static void runSdCmd(const SdCmd& cmd)
 {
@@ -2569,6 +2608,20 @@ static void runSdCmd(const SdCmd& cmd)
       reply[1U + SDCARD_RESULT_WIDTH] = '.';
       writeUintField(bytesRead, SDCARD_LEN_MAX_WIDTH,
         &reply[2U + SDCARD_RESULT_WIDTH]);
+      sdSend(reply, (uint16_t)sizeof(reply));
+      break;
+    }
+
+    case SdCmd::list:   // -> N frames, then F<rr>.<count>
+    {
+      uint32_t count = 0U;
+      FRESULT result = sdCard.listDir(cmd.text, sendSdEntry, nullptr, &count);
+
+      char reply[1U + SDCARD_RESULT_WIDTH + 1U + SDCARD_COUNT_WIDTH];
+      reply[0] = 'F';
+      writeUintField((uint32_t)result, SDCARD_RESULT_WIDTH, &reply[1]);
+      reply[1U + SDCARD_RESULT_WIDTH] = '.';
+      writeUintField(count, SDCARD_COUNT_WIDTH, &reply[2U + SDCARD_RESULT_WIDTH]);
       sdSend(reply, (uint16_t)sizeof(reply));
       break;
     }
@@ -2714,6 +2767,15 @@ void sdSockReceiveHandler(const char* data, uint16_t dataLen)
         return;
       }
       cmd.op = SdCmd::close;
+      break;
+
+    case 'F':   // F - list the root; F<path> - list that folder
+      if((dataLen > 1U) &&
+         !copySdPath(&data[1], (uint16_t)(dataLen - 1U), &cmd))
+      {
+        return;
+      }
+      cmd.op = SdCmd::list;   // F alone: text stays "", the root
       break;
 
     case 'S':   // status      - answered on the ack, in sdSockInstantHandler()

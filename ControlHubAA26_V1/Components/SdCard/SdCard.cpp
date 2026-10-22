@@ -14,7 +14,7 @@ SdCard::SdCard(SD_HandleTypeDef* hsd, FATFS* fs, const char* drivePath,
                GPIO_PinState detectActive)
   : hsd(hsd), fs(fs), drivePath(drivePath),
     detectPort(detectPort), detectPin(detectPin), detectActive(detectActive),
-    file(),
+    file(), dir(), info(),
     mounted(false), fileOpen(false), fileWritable(false), fileSize(0U),
     lastResult(FR_OK),
     lastMountMs(0U),
@@ -195,25 +195,32 @@ FRESULT SdCard::openWrite(const char* path, WriteMode mode)
   return this->openFile(path, flags, true);
 }
 
+FRESULT SdCard::ensureMounted()
+{
+  if(this->mounted)
+  {
+    return FR_OK;
+  }
+
+  if(!this->isCardPresent())
+  {
+    return this->setResult(FR_NOT_READY);
+  }
+
+  return this->mount();
+}
+
 FRESULT SdCard::openFile(const char* path, BYTE flags, bool writable)
 {
   (void)this->close();
 
-  if(!this->mounted)
+  FRESULT result = this->ensureMounted();
+  if(result != FR_OK)
   {
-    if(!this->isCardPresent())
-    {
-      return this->setResult(FR_NOT_READY);
-    }
-
-    FRESULT result = this->mount();
-    if(result != FR_OK)
-    {
-      return result;
-    }
+    return result;
   }
 
-  FRESULT result = f_open(&this->file, path, flags);
+  result = f_open(&this->file, path, flags);
   if(result == FR_OK)
   {
     this->fileOpen = true;
@@ -305,6 +312,46 @@ FRESULT SdCard::close()
   this->fileWritable = false;
   this->fileSize = 0U;
   return this->setResult(f_close(&this->file));
+}
+
+FRESULT SdCard::listDir(const char* path, DirEntryFunc onEntry, void* context,
+                        uint32_t* count)
+{
+  *count = 0U;
+
+  FRESULT result = this->ensureMounted();
+  if(result != FR_OK)
+  {
+    return result;
+  }
+
+  result = f_opendir(&this->dir, path);
+  if(result != FR_OK)
+  {
+    return this->setResult(result);
+  }
+
+  for(;;)
+  {
+    result = f_readdir(&this->dir, &this->info);
+    if((result != FR_OK) || (this->info.fname[0] == '\0'))
+    {
+      break;   // an error, or the end of the folder
+    }
+
+    DirEntry entry;
+    entry.name      = this->info.fname;
+    entry.shortName = this->info.altname;
+    entry.size      = (uint32_t)this->info.fsize;
+    entry.isDir     = ((this->info.fattrib & AM_DIR) != 0U);
+    onEntry(entry, context);
+    (*count)++;
+  }
+
+  /* Closed whatever happened, so the next listing starts clean. The
+     error that ended the loop, if any, is the one reported. */
+  FRESULT closeResult = f_closedir(&this->dir);
+  return this->setResult((result != FR_OK) ? result : closeResult);
 }
 
 bool SdCard::isMounted() const

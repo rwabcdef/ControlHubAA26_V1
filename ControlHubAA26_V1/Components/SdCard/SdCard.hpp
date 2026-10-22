@@ -12,6 +12,7 @@
  *   openWrite(path, m) --> f_open(FA_WRITE | ...)   overwrite / append / new
  *   write(data, ...)   --> f_write, then f_sync if asked
  *   close()            --> f_close                  (flushes a write file)
+ *   listDir(path, ...) --> f_opendir + f_readdir    one callback per entry
  *
  * Writing
  * -------
@@ -177,6 +178,28 @@ class SdCard
     // file, any unsynced data reaches the card here.
     FRESULT close();
 
+    // One entry of a folder, as listDir() reports it. The names point
+    // into SdCard's own FILINFO, so they are only valid during the call.
+    struct DirEntry
+    {
+      const char* name;        // the long file name (or the 8.3 one, if it has none)
+      const char* shortName;   // the 8.3 name - opens the same file
+      uint32_t    size;        // bytes; 0 for a folder
+      bool        isDir;
+    };
+    typedef void (*DirEntryFunc)(const DirEntry& entry, void* context);
+
+    // Owner task. Calls onEntry for every entry in the folder at path
+    // ("" for the root), in directory order, folders included, and sets
+    // *count to how many were reported. Not recursive. Mounts first if
+    // needed, as open() does, and leaves an open file alone - but a
+    // write file's size here is only as current as its last sync.
+    //
+    // The card time is small - 16 directory entries per sector, fewer
+    // with long names - so the cost is whatever onEntry does.
+    FRESULT listDir(const char* path, DirEntryFunc onEntry, void* context,
+                    uint32_t* count);
+
     // Getters - any task, see Threading.
     bool isMounted() const;
     bool isFileOpen() const;
@@ -191,6 +214,10 @@ class SdCard
 
   private:
     FRESULT setResult(FRESULT result);
+
+    // A card present but not mounted is mounted (so a mount that failed
+    // is retried); no card is FR_NOT_READY.
+    FRESULT ensureMounted();
 
     // open() and openWrite(): close, mount if needed, f_open with flags.
     FRESULT openFile(const char* path, BYTE flags, bool writable);
@@ -209,8 +236,12 @@ class SdCard
     uint16_t      detectPin;
     GPIO_PinState detectActive;
 
-    // Not on the owner's stack: a FIL carries a 512 byte sector buffer.
+    // Not on the owner's stack: a FIL carries a 512 byte sector buffer,
+    // and a FILINFO a 256 byte long name, on top of FatFs's own 512 byte
+    // LFN buffer, which is on the stack (see Stack, above).
     FIL           file;
+    DIR           dir;     // listDir()'s
+    FILINFO       info;    // listDir()'s
 
     volatile bool    mounted;
     volatile bool    fileOpen;
