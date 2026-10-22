@@ -1,17 +1,19 @@
 ControlHubAA26 - SerLink socket summary and protocol contract
 (sources: ControlHubAA26_V1/Core/Src/main_tasks.cpp, Core/Inc/HubApp.hpp)
 
-This file is the contract between the three projects:
-  hub firmware   this repo
-  remote hub     C:\Users\rwabc\Software\Embedded\Arduino\Arduino_uno_r4_gp  (sketches/remote_hub)
-  desktop app    C:\Users\rwabc\Documents\Projects\Embedded\ControlHubAA26\Desktop_App\v1
-A change to any frame below has to be made at both ends.
+This file is the contract between the four projects:
+  hub firmware        this repo
+  remote hub          C:\Users\rwabc\Software\Embedded\Arduino\Arduino_uno_r4_gp  (sketches/remote_hub)
+  desktop app         C:\Users\rwabc\Documents\Projects\Embedded\ControlHubAA26\Desktop_App\v1  (Electron)
+  desktop app (py)    C:\Users\rwabc\Documents\Projects\Embedded\ControlHubAA26\Desktop_App\ControlHub_App_V1_py  (Python port)
+A change to any frame below has to be made at both ends - for MQTT frames, in both
+desktop apps.
 
 Transports (on the hub):
   transport0 = SerLink0, uart2 (USART2, FTDI cable)             - serial console / debug
   transport1 = SerLink1, nRF24L01 radio                          - the remote hub
   transport2 = SerLink2, MQTT (down: hub/aa26/serlink/down,
-                               up:   hub/aa26/serlink/up)        - the desktop app
+                               up:   hub/aa26/serlink/up)        - a desktop app (either)
 
 Socket  transport0   transport1   transport2   Receive callback (sets)      Instant handler (reads)
 ------  -----------  -----------  -----------  ---------------------------  ------------------------
