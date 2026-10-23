@@ -209,6 +209,7 @@ SDC00T569005FLOGS          # the LOGS folder; F05 if there is no such folder
 #include "Controller.hpp"
 #include "Lift.hpp"
 #include "SdCard.hpp"
+#include "Rtc.hpp"
 #include "Radio.hpp"
 #include "MqttPubSub.hpp"
 #include "SerLinkMqttAdapter.hpp"
@@ -1045,6 +1046,20 @@ QueueHandle_t sdCmdQueue;
 SerLink::Socket* sdSocket = nullptr;
 
 //--------------------------------------------------------------
+// Real time clock - the MCU's own RTC, on the 32.768 kHz LSE crystal. See
+// Rtc.hpp. It runs through a reset but not a power cycle (no battery on
+// VBAT), so after power up isSet() is false until something sets it.
+//
+// RTC_MARKER_REGISTER is the backup register Rtc keeps its "set" marker
+// in. Nothing else uses the backup registers yet; anything that does must
+// keep off this one.
+#define RTC_MARKER_REGISTER   RTC_BKP_DR0
+
+extern RTC_HandleTypeDef hrtc;   // main.c
+
+Rtc rtc(&hrtc, RTC_MARKER_REGISTER);
+
+//--------------------------------------------------------------
 // nRF24L01 radio (radio1, above) on SPI5. The driver owns CE (PF6) and CSN
 // (PF10); spi5 itself handles only SCK/MISO/MOSI. Channel 76, 1 Mbps and
 // 32 byte payloads are fixed in Components/Radio and must match the remote
@@ -1212,6 +1227,10 @@ void initTasks()
   adc1.start();
 
   adcTaskHandle = osThreadNew(startAdcTask, NULL, &adcTask_attributes);
+
+  /* Before the SD card, since FatFs stamps files from it (get_fattime()).
+     MX_RTC_Init() has run by now - it is in main()'s generated init. */
+  rtc.init();
 
   /* SD card. init() only sets up the card detect pin - the card itself
      cannot be touched until the scheduler runs (see SdCard.hpp), so
@@ -2415,6 +2434,13 @@ alignas(4) static uint8_t sdReadBuffer[SDCARD_READ_MAX];
 extern "C" uint8_t BSP_SD_IsDetected(void)
 {
   return sdCard.isCardPresent() ? SD_PRESENT : SD_NOT_PRESENT;
+}
+
+// FatFs's file timestamps: get_fattime() in fatfs.c calls this, from
+// sdCardTask inside FatFs. The epoch, 1980-01-01, until the clock is set.
+extern "C" uint32_t rtcGetFatTime(void)
+{
+  return rtc.getFatTime();
 }
 
 // S<P|A><M|U><R|W|C>.<rr> - the status read and the board's own status

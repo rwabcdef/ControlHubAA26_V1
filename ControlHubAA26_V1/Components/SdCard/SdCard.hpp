@@ -24,8 +24,9 @@
  * sector buffer, and the size in the directory entry is the old one - so
  * a card pulled out, or the power lost, takes it with it. write(..., sync)
  * flushes it straight away, at the cost of extra card writes (the FAT
- * and the directory sector, each time). Without a clock (get_fattime() in
- * fatfs.c) every file is stamped 1980-01-01 00:00.
+ * and the directory sector, each time). Files are stamped from the RTC
+ * (get_fattime() in fatfs.c, see Rtc.hpp) - 1980-01-01 00:00 until the
+ * clock has been set since power up.
  *
  * A full volume shows as FR_DENIED from write(), with *bytesWritten
  * saying how much did fit.

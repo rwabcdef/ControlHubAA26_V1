@@ -113,6 +113,11 @@ USER CODE blocks that matter and are easy to lose:
   overrides `ClockDiv` to 4 (8 MHz) for the jumper wiring, whatever the `.ioc` says, and
   `sd_diskio.c` `firstSection` defines `ENABLE_SCRATCH_BUFFER` so an unaligned `f_read`
   buffer cannot be silently corrupted by the word-wide SDIO DMA.
+- RTC: keep **Activate Calendar unticked** in the `.ioc`. Ticked, CubeMX generates a
+  `SetTime`/`SetDate` in `MX_RTC_Init()` that resets the clock on every reset. The RTC
+  (LSE crystal) runs through a reset but not a power cycle (no VBAT battery); `Rtc`
+  keeps a "set" marker in backup register DR0. `fatfs.c` `get_fattime` stamps files
+  from it via `rtcGetFatTime()` (`main_tasks.cpp`).
 - Not USER CODE, but related: ST's `FatFs/src/diskio.c` initialises the SD card only once
   per boot (`disk.is_initialized[]` is never cleared), so a re-inserted card is never
   re-identified and its first read hangs 30 s. `SdCard::mount()` clears the flag before
@@ -230,7 +235,7 @@ not corruption.
 
 `Components/` holds hardware abstractions used by the application (`Led`, `Button`, `PWM`,
 `Motor/TC78H611FNG`, `Motor/L293D`, `Adc`, `Tachometer`, `Controller`, `Lift`,
-`SdCard`, `nRF24L01`, `Radio`, `Mqtt`, `Adapters`). `HAL/` holds thin
+`SdCard`, `Rtc`, `nRF24L01`, `Radio`, `Mqtt`, `Adapters`). `HAL/` holds thin
 per-peripheral C wrappers over CubeMX's handles (`uart2`, `spi5`) that CubeMX does not
 generate.
 
