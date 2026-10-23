@@ -20,6 +20,13 @@ static void writeDigits(uint32_t value, uint8_t width, char* dst)
   }
 }
 
+// Appends len chars of src at *pos, and moves *pos on past them.
+static void appendText(char** pos, const char* src, size_t len)
+{
+  memcpy(*pos, src, len);
+  *pos += len;
+}
+
 HubApp::HubApp(const HubAppConfig& config)
 : config(config), valid(false), statusSocket(nullptr), ledSocket(nullptr),
   staticQueue(), queueStorage(), queue(nullptr),
@@ -259,6 +266,25 @@ void HubApp::startControl(source from)
 
   currentMode = mode::control;
   statusPasses = 0U;
+
+  if(config.logger != nullptr)
+  {
+    /* Control start PC F 0150rpm */
+    char line[32];
+    char* p = line;
+    appendText(&p, "Control start ", 14U);
+    if(from == source::remote) { appendText(&p, "remote ", 7U); }
+    else                       { appendText(&p, "PC ", 3U); }
+    *p++ = (selectedDir == ControllerDirection::reverse) ? 'R' : 'F';
+    *p++ = ' ';
+    uint32_t rpm = runRpm();
+    if(rpm > 9999U) { rpm = 9999U; }
+    writeDigits(rpm, 4U, p);
+    p += 4;
+    appendText(&p, "rpm", 4U);   // with the NUL
+    config.logger->info(line);
+  }
+
   sendStatus();
 }
 
@@ -281,6 +307,10 @@ void HubApp::stopAll()
 
   if(currentMode != mode::idle)
   {
+    if(config.logger != nullptr)
+    {
+      config.logger->info((currentMode == mode::lift) ? "Stop Lift" : "Stop Control");
+    }
     enterIdle();
   }
 }
@@ -331,16 +361,40 @@ void HubApp::writeStatus(char* dst) const
 
 void HubApp::sendStatus()
 {
-  if(statusSocket == nullptr)
-  {
-    return;
-  }
-
   char data[STATUS_LEN];
   writeStatus(data);
 
+  if(config.logger != nullptr)
+  {
+    logStatus(data);
+  }
+
   /* Non-blocking: queued for the writer, and dropped while MQTT is down. */
-  statusSocket->sendData(data, STATUS_LEN, false);
+  if(statusSocket != nullptr)
+  {
+    statusSocket->sendData(data, STATUS_LEN, false);
+  }
+}
+
+void HubApp::logStatus(const char* status)
+{
+  /* The status frame's fields, written out:
+       CF030.0350.1234.0150  ->  C F 030% 0350rpm 1234mA tgt 0150rpm */
+  char line[40];
+  char* p = line;
+  *p++ = status[0];
+  *p++ = ' ';
+  *p++ = status[1];
+  *p++ = ' ';
+  appendText(&p, &status[2], 3U);
+  appendText(&p, "% ", 2U);
+  appendText(&p, &status[6], 4U);
+  appendText(&p, "rpm ", 4U);
+  appendText(&p, &status[11], 4U);
+  appendText(&p, "mA tgt ", 7U);
+  appendText(&p, &status[16], 4U);
+  appendText(&p, "rpm", 4U);   // with the NUL
+  config.logger->info(line);
 }
 
 void HubApp::updateLeds(bool force)

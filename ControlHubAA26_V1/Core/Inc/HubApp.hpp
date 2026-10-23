@@ -53,6 +53,22 @@
  *     (a change, not a refresh, is also passed to config.logEvent);
  *   - the LIFT0 done frame, through onLiftDone, when a move ends.
  *
+ * Log file
+ * --------
+ * With config.logger set, run() also logs (at info) each Control start,
+ * each stopAll() that ended a run, and every status it sends - the same
+ * values as the status frame, written out:
+ *
+ *   Control start PC F 0150rpm         <source PC|remote> <dir> <run target>
+ *   Stop Control                       or Stop Lift - from the PC, the
+ *                                      remote, or the remote going quiet
+ *   C F 030% 0350rpm 1234mA tgt 0150rpm  <mode C|L|I> <dir> duty, measured
+ *                                      rpm, current, run target
+ *
+ * A run that ends by itself - a lift move arriving, a tacho fault - shows
+ * as the I status line that follows, with no Stop line. Status lines come
+ * every statusPeriodMs while running, so they are most of the file.
+ *
  * Threading
  * ---------
  * run() belongs to one task (controlBTask), which must also be the only
@@ -78,6 +94,7 @@
 #include "Controller.hpp"
 #include "Lift.hpp"
 #include "Socket.hpp"
+#include "Logger.hpp"
 
 struct HubAppConfig
 {
@@ -104,6 +121,9 @@ struct HubAppConfig
   // Called with each LED01 frame that reports a change - not the periodic
   // refresh. May be nullptr.
   void (*logEvent)(const char* protocol, const char* data, uint16_t dataLen);
+
+  // The log file - see Log file, above. May be nullptr.
+  Logger* logger;
 };
 
 // A command for run(). One queue item per command, so its fields always
@@ -215,6 +235,7 @@ class HubApp
     void enterIdle();
     uint16_t runRpm() const;
     void sendStatus();
+    void logStatus(const char* status);
     void updateLeds(bool force);
 };
 

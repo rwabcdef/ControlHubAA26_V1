@@ -139,6 +139,10 @@ SDC00T564001E              # diagnostics -> SDC00A564015E00000008.00041
                            #   HAL SD error code (hex HAL_SD_ERROR_* bits, of
                            #   the most recent transfer) . last mount in ms
                            #   See writeSdDiagnostics() for the common bits.
+SDC00T570001G              # the log file (logger) -> SDC00A570019G00.C.000123.000000
+                           #   last write's FRESULT . C closed / O a failed close
+                           #   being retried (the file stays locked, O16 to an
+                           #   open) . lines written . lines dropped
 
 # Commands - plain ACK_OK, then the answer arrives as a frame of its own,
 # because the SD work happens in sdCardTask, not on the link's task.
@@ -220,6 +224,7 @@ SDC00T569005FLOGS          # the LOGS folder; F05 if there is no such folder
 #include "Lift.hpp"
 #include "SdCard.hpp"
 #include "Rtc.hpp"
+#include "Logger.hpp"
 #include "Radio.hpp"
 #include "MqttPubSub.hpp"
 #include "SerLinkMqttAdapter.hpp"
@@ -934,6 +939,10 @@ static void logEvent(const char* protocol, const char* data, uint16_t dataLen)
 // controlBTask; the socket handlers only parse and post to it.
 static void sendLiftDone();   // the LIFT0 done frame, in the LIFT0 section
 
+// Defined with the rest of the log file's setup, below the RTC; hubApp
+// logs its starts, stops and status to it.
+extern Logger logger;
+
 static const HubAppConfig hubAppConfig =
 {
   &controllerB,
@@ -958,7 +967,8 @@ static const HubAppConfig hubAppConfig =
   REMOTE_HEARTBEAT_TIMEOUT_MS,
   REMOTE_LED_RUN_ID,
   REMOTE_LED_DIRECTION_ID,
-  logEvent
+  logEvent,
+  &logger
 };
 
 HubApp hubApp(hubAppConfig);
@@ -1079,6 +1089,38 @@ Rtc rtc(&hrtc, RTC_MARKER_REGISTER);
 // (MQTT) - the PC apps set the clock through the latter.
 SerLink::Socket* rtcSocket = nullptr;
 SerLink::Socket* rtcMqttSocket = nullptr;
+
+//--------------------------------------------------------------
+// Log file - data and events, one line each, on the SD card. See
+// Logger.hpp. Any task logs (logger.info("...")); sdCardTask, which owns
+// the card, writes the lines in batches.
+//
+// Each boot starts the file afresh (the first write empties it), so copy
+// it off before a reset if it matters. The level is the minimum logged:
+// Logger::level::debug, info or error.
+#define LOGGER_FILE_PATH               "LOG.TXT"
+#define LOGGER_QUEUE_LENGTH            16U
+#define LOGGER_WRITE_NUM_THRESHOLD     8U      // lines queued -> write
+#define LOGGER_WRITE_TIME_THRESHOLD_MS 1000U   // or this long since the last write
+#define LOGGER_LEVEL                   Logger::level::info
+
+// HH-MM-SS - the date is left out.
+Logger logger(LOGGER_FILE_PATH, &rtc,
+  [](const DateTime& dt, char* dst) -> uint8_t
+  {
+    const uint8_t fields[3] = { dt.hour, dt.minute, dt.second };
+    for(uint8_t i = 0U; i < 3U; i++)
+    {
+      dst[i * 3U]      = (char)('0' + (fields[i] / 10U));
+      dst[i * 3U + 1U] = (char)('0' + (fields[i] % 10U));
+      if(i < 2U) { dst[i * 3U + 2U] = '-'; }
+    }
+    return 8U;
+  },
+  LOGGER_WRITE_NUM_THRESHOLD, LOGGER_WRITE_TIME_THRESHOLD_MS, LOGGER_LEVEL);
+
+StaticQueue_t loggerStaticQueue;
+uint8_t loggerQueueStorageArea[LOGGER_QUEUE_LENGTH * sizeof(Logger::Entry)];
 
 //--------------------------------------------------------------
 // nRF24L01 radio (radio1, above) on SPI5. The driver owns CE (PF6) and CSN
@@ -1256,6 +1298,11 @@ void initTasks()
   /* Set and read both on the ack - see the RTC00 socket's handlers. Nothing
      for the receive callback to do on uart2. */
   rtcSocket = transport0.acquireSocket("RTC00", nullptr, rtcSockInstantHandler);
+
+  /* After the clock it stamps lines from, and before any task that logs;
+     sdCardTask (below) writes them. */
+  logger.init(xQueueCreateStatic(LOGGER_QUEUE_LENGTH, sizeof(Logger::Entry),
+    loggerQueueStorageArea, &loggerStaticQueue), LOGGER_QUEUE_LENGTH);
 
   /* SD card. init() only sets up the card detect pin - the card itself
      cannot be touched until the scheduler runs (see SdCard.hpp), so
@@ -2833,6 +2880,10 @@ void startSdCardTask(void *argument)
       writeSdStatus(status);
       sdSend(status, (uint16_t)sizeof(status));
     }
+
+    /* Writes the queued log lines once enough have built up, or enough time
+       has passed - so at most SDCARD_POLL_MS after either. */
+    (void)logger.run(sdCard.isMounted());
   }
 }
 
@@ -3011,6 +3062,27 @@ bool sdSockInstantHandler(SerLink::Frame &rxFrame, uint16_t* dataLen, char* data
       writeSdDiagnostics(data);
       *dataLen = SDCARD_DIAG_LEN;
       return true;
+
+    case 'G':
+    {
+      /* The logger's state: G<rr>.<O|C>.<written>.<dropped>. Getters, each
+         one word, so safe here in the Reader's task. */
+      uint32_t written = logger.getWritten();
+      uint32_t dropped = logger.getDropped();
+      if(written > 999999U) { written = 999999U; }
+      if(dropped > 999999U) { dropped = 999999U; }
+
+      data[0] = 'G';
+      writeUintField((uint32_t)logger.getLastResult(), SDCARD_RESULT_WIDTH, &data[1]);
+      data[3] = '.';
+      data[4] = logger.isFileOpen() ? 'O' : 'C';
+      data[5] = '.';
+      writeUintField(written, 6U, &data[6]);
+      data[12] = '.';
+      writeUintField(dropped, 6U, &data[13]);
+      *dataLen = 19U;
+      return true;
+    }
 
     default:
       return false;   // C (close) is a command

@@ -236,9 +236,15 @@ not corruption.
 
 `Components/` holds hardware abstractions used by the application (`Led`, `Button`, `PWM`,
 `Motor/TC78H611FNG`, `Motor/L293D`, `Adc`, `Tachometer`, `Controller`, `Lift`,
-`SdCard`, `Rtc`, `nRF24L01`, `Radio`, `Mqtt`, `Adapters`). `HAL/` holds thin
+`SdCard`, `Rtc`, `Logger`, `nRF24L01`, `Radio`, `Mqtt`, `Adapters`). `HAL/` holds thin
 per-peripheral C wrappers over CubeMX's handles (`uart2`, `spi5`) that CubeMX does not
 generate.
+
+`Logger` (`logger` in `main_tasks.cpp`, file `LOG.TXT`) queues lines from any task
+(`debug`/`info`/`error`, stamped HH-MM-SS from the RTC). sdCardTask writes them in
+batches (`logger.run()`), with its own FIL beside SdCard's: ffconf.h's `_FS_LOCK` is 2,
+exactly enough for both. The first write after boot empties the file. The levels are
+lower case (`Logger::level::debug`) because the Debug build defines `DEBUG` as a macro.
 
 Two shared-state gotchas:
 
