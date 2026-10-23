@@ -112,6 +112,16 @@ ADC00T529002G1      # raw count, 4 digits
 ADC00T529002V1      # millivolts, 4 digits
 ADC00T529002GA      # all four channels, raw
 
+# Real time clock socket - RTC00, over SerLink2 (MQTT) and SerLink0 (uart2).
+# Local time, 24 hour, yyyymmddhhmmss. Both answered on the ack, so send 'T'.
+# The PC apps set it when they connect (their "set hub date time on app
+# launch" setting). See Rtc.hpp.
+RTC00T570015S20261023143005   # set -> RTC00A570002S1, or S0 if refused (not 14
+                              #   digits, or not a real date in 2000..2099)
+RTC00T571001G                 # read -> RTC00A571016G120261023143007
+                              #   G<1|0><yyyymmddhhmmss>: 1 = set since power
+                              #   up; 0 = still counting from 2000-01-01
+
 # SD card socket - SDC00, over SerLink0 (uart2). See the SD card block
 # below initTasks()'s globals for the wiring, and SdCard.hpp. One file
 # open at a time, for reading or for writing.
@@ -408,6 +418,11 @@ bool controlSockInstantHandler(SerLink::Frame &rxFrame, uint16_t* dataLen, char*
 // implementations, below the CTRL0 socket's.
 void liftSockReceiveHandler(const char* data, uint16_t dataLen);
 bool liftSockInstantHandler(SerLink::Frame &rxFrame, uint16_t* dataLen, char* data);
+
+// RTC00 socket handlers - the real time clock, documented above their
+// implementations, below the LIFT0 socket's.
+void rtcMqttSockReceiveHandler(const char* data, uint16_t dataLen);
+bool rtcSockInstantHandler(SerLink::Frame &rxFrame, uint16_t* dataLen, char* data);
 
 // ADC00 socket handler - reads only, documented above its implementation.
 bool adcSockInstantHandler(SerLink::Frame &rxFrame, uint16_t* dataLen, char* data);
@@ -882,6 +897,7 @@ SerLink::Socket* adcSocket = nullptr;
 //   DBG00U<rrr>011MOTOR BP030   MOTOR set from the PC (MQTT)
 //   DBG00U<rrr>013LIFT0 BSF234  LIFT0 command from the PC
 //   DBG00U<rrr>021LIFT0 BI000234.000234  LIFT0 done frame, hub -> PC
+//   DBG00U<rrr>021RTC00 S20261023143005  RTC00 set from the PC (MQTT)
 //   DBG00U<rrr>008LED01 A1      LED01 to the remote, on a change only
 //
 // Not echoed: anything periodic or high rate - the CTRL0 status frame,
@@ -1059,6 +1075,11 @@ extern RTC_HandleTypeDef hrtc;   // main.c
 
 Rtc rtc(&hrtc, RTC_MARKER_REGISTER);
 
+// RTC00, acquired in initTasks() on transport0 (uart2) and transport2
+// (MQTT) - the PC apps set the clock through the latter.
+SerLink::Socket* rtcSocket = nullptr;
+SerLink::Socket* rtcMqttSocket = nullptr;
+
 //--------------------------------------------------------------
 // nRF24L01 radio (radio1, above) on SPI5. The driver owns CE (PF6) and CSN
 // (PF10); spi5 itself handles only SCK/MISO/MOSI. Channel 76, 1 Mbps and
@@ -1232,6 +1253,10 @@ void initTasks()
      MX_RTC_Init() has run by now - it is in main()'s generated init. */
   rtc.init();
 
+  /* Set and read both on the ack - see the RTC00 socket's handlers. Nothing
+     for the receive callback to do on uart2. */
+  rtcSocket = transport0.acquireSocket("RTC00", nullptr, rtcSockInstantHandler);
+
   /* SD card. init() only sets up the card detect pin - the card itself
      cannot be touched until the scheduler runs (see SdCard.hpp), so
      sdCardTask mounts it on its first polls. The command queue comes
@@ -1288,6 +1313,11 @@ void initTasks()
      ack, from reader2Task. */
   liftMqttSocket = transport2.acquireSocket("LIFT0", liftSockReceiveHandler,
     liftSockInstantHandler);
+
+  /* The same instant handler as uart2's RTC00; the receive callback only
+     echoes a set to the serial console. */
+  rtcMqttSocket = transport2.acquireSocket("RTC00", rtcMqttSockReceiveHandler,
+    rtcSockInstantHandler);
 
   writer2.init([](char* buffer) -> uint8_t { return mqtt2.write(buffer); });
   reader2.init(mqtt2.rxDataQueue, &writer2, transport2.queue);
@@ -2276,6 +2306,118 @@ bool liftSockInstantHandler(SerLink::Frame &rxFrame, uint16_t* dataLen, char* da
   writeLiftStatus(*lift, data);
   *dataLen = LIFT_STATUS_LEN;
   return true;
+}
+
+//--------------------------------------------------------------
+// RTC00 socket - the hub's real time clock (rtc, Rtc.hpp), over SerLink2
+// (MQTT) and SerLink0 (uart2). Local time, 24 hour, as yyyymmddhhmmss.
+//
+// Both commands are answered on the ack, by rtcSockInstantHandler() in
+// the Reader's task, so send them as 'T':
+//
+//   RTC00T570015S20261023143005  ->  RTC00A570002S1
+//     set to 2026-10-23 14:30:05. S1 if taken; S0, with the clock left as
+//     it was, if the data is not 14 digits, or not a real date and time
+//     in 2000..2099.
+//
+//   RTC00T571001G                ->  RTC00A571016G120261023143007
+//     read: G<1|0><yyyymmddhhmmss>. 1 = set since power up; 0 = still
+//     counting from the power up default, 2000-01-01 00:00:00.
+//
+// Anything else gets a plain ACK_OK.
+//
+// The set is done in the instant handler, not in a receive callback as
+// other sets are, so that the ack can say whether it was taken - a
+// receive callback runs after the ack has gone. That is safe here: a set
+// is a few register writes, microseconds, and Rtc is any-task safe (see
+// Threading in Rtc.hpp).
+//
+// The PC apps set the clock when they connect ("set hub date time on app
+// launch", on by default). The hub has no battery on VBAT, so the time
+// survives a reset but not a power cycle - G0 after one.
+
+#define RTC_DATETIME_LEN    14U                        // yyyymmddhhmmss
+#define RTC_CMD_SET_LEN     (1U + RTC_DATETIME_LEN)    // S<datetime>
+#define RTC_CMD_GET_LEN     1U                         // G
+#define RTC_REPLY_SET_LEN   2U                         // S<1|0>
+#define RTC_REPLY_GET_LEN   (2U + RTC_DATETIME_LEN)    // G<1|0><datetime>
+
+// yyyymmddhhmmss -> dt. Digits only; the ranges are Rtc::setDateTime()'s
+// to check.
+static bool readRtcDateTime(const char* src, DateTime* dt)
+{
+  uint32_t year, month, day, hour, minute, second;
+
+  if(!readUintField(&src[0], 4U, &year)    ||
+     !readUintField(&src[4], 2U, &month)   ||
+     !readUintField(&src[6], 2U, &day)     ||
+     !readUintField(&src[8], 2U, &hour)    ||
+     !readUintField(&src[10], 2U, &minute) ||
+     !readUintField(&src[12], 2U, &second))
+  {
+    return false;
+  }
+
+  dt->year   = (uint16_t)year;
+  dt->month  = (uint8_t)month;
+  dt->day    = (uint8_t)day;
+  dt->hour   = (uint8_t)hour;
+  dt->minute = (uint8_t)minute;
+  dt->second = (uint8_t)second;
+  return true;
+}
+
+// dt -> yyyymmddhhmmss, RTC_DATETIME_LEN chars, no NUL.
+static void writeRtcDateTime(const DateTime& dt, char* dst)
+{
+  writeUintField(dt.year, 4U, &dst[0]);
+  writeUintField(dt.month, 2U, &dst[4]);
+  writeUintField(dt.day, 2U, &dst[6]);
+  writeUintField(dt.hour, 2U, &dst[8]);
+  writeUintField(dt.minute, 2U, &dst[10]);
+  writeUintField(dt.second, 2U, &dst[12]);
+}
+
+// Runs in serLink2Task, after the set has been done and answered.
+// Only echoes it to the serial console; reads are not echoed.
+void rtcMqttSockReceiveHandler(const char* data, uint16_t dataLen)
+{
+  if((dataLen > 0U) && (data[0] == 'S'))
+  {
+    logEvent("RTC00", data, dataLen);
+  }
+}
+
+// The set and the read. Runs in the Reader's task (reader0Task or
+// reader2Task), before the ack is sent.
+bool rtcSockInstantHandler(SerLink::Frame &rxFrame, uint16_t* dataLen, char* data)
+{
+  if((rxFrame.dataLen >= 1U) && (rxFrame.data[0] == 'S'))
+  {
+    DateTime dt = {};
+    bool ok = (rxFrame.dataLen == RTC_CMD_SET_LEN) &&
+              readRtcDateTime(&rxFrame.data[1], &dt) &&
+              rtc.setDateTime(dt);
+
+    data[0] = 'S';
+    data[1] = ok ? '1' : '0';
+    *dataLen = RTC_REPLY_SET_LEN;
+    return true;
+  }
+
+  if((rxFrame.dataLen == RTC_CMD_GET_LEN) && (rxFrame.data[0] == 'G'))
+  {
+    DateTime dt;
+    bool isSet = rtc.getDateTime(dt);
+
+    data[0] = 'G';
+    data[1] = isSet ? '1' : '0';
+    writeRtcDateTime(dt, &data[2]);
+    *dataLen = RTC_REPLY_GET_LEN;
+    return true;
+  }
+
+  return false;
 }
 
 //--------------------------------------------------------------

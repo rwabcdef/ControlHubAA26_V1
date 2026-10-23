@@ -22,6 +22,7 @@ LIFT0   -            -            yes          liftSockReceiveHandler       lift
 MOTOR   yes          -            yes          motorSockReceiveHandler      motorSockInstantHandler
 ADC00   yes          -            -            -                            adcSockInstantHandler
 SDC00   yes          -            -            sdSockReceiveHandler         sdSockInstantHandler
+RTC00   yes          -            yes          (MQTT: event echo only)      rtcSockInstantHandler
 DBG00   yes          yes          yes          -                            debugSockInstantHandler
 LED01   -            yes (tx)     -            -                            -
 BTN01   -            yes (rx)     -            buttonSockReceiveHandler     -
@@ -29,9 +30,9 @@ POT01   -            yes (rx)     -            potSockReceiveHandler        -
 HBT01   -            yes (rx)     -            heartbeatSockReceiveHandler  -
 
 Socket count per transport (limit SERLINK_CONFIG__MAX_SOCKETS = 10):
-  transport0: 5 - MOTOR, CTRL0, ADC00, SDC00, DBG00
+  transport0: 6 - MOTOR, CTRL0, ADC00, RTC00, SDC00, DBG00
   transport1: 5 - LED01, BTN01, POT01, HBT01, DBG00
-  transport2: 4 - DBG00, CTRL0, MOTOR, LIFT0
+  transport2: 5 - DBG00, CTRL0, MOTOR, LIFT0, RTC00
 
 On any transport, a protocol with no socket answers an 'S' PING with a plain
 ACK_OK instead of PINGBACK.
@@ -90,6 +91,20 @@ LIFT0 - hub <-> PC (MQTT only). Selector B (liftB).
   done (hub -> PC, 'U'): B<M|I|G><dddddd>.<dddddd>, when a move ends
 
 ------------------------------------------------------------------------------
+RTC00 - hub <-> PC (MQTT) and serial. The hub's real time clock (Rtc.hpp).
+------------------------------------------------------------------------------
+Local time, 24 hour, <yyyymmddhhmmss> (14 digits). Both answered on the ack - send as 'T'.
+  S<yyyymmddhhmmss>  set -> S1 taken / S0 refused (not 14 digits, or not a real
+                     date and time in 2000..2099; the clock is left as it was)
+  G                  read -> G<1|0><yyyymmddhhmmss>   1 = set since power up,
+                     0 = counting from 2000-01-01 00:00:00 (no VBAT battery, so a
+                     power cycle loses the time; a reset does not)
+  e.g. RTC00T570015S20261023143005 -> RTC00A570002S1
+       RTC00T571001G               -> RTC00A571016G120261023143007
+Both desktop apps send S once per app run, on the first connection that takes it
+(their "set hub date time on app launch" setting, on by default).
+
+------------------------------------------------------------------------------
 Remote hub <-> hub (radio). Frame data is 9 characters at most.
 ------------------------------------------------------------------------------
   BTN01  remote -> hub  'T'  <id><event>: 1P = start/stop, 2P = direction
@@ -114,7 +129,8 @@ SDC00  SD card - see the top of main_tasks.cpp.
 DBG00  R (link check), S<nn> / SL (task stacks), M (MQTT link stats).
        Event echo (hub -> serial console, 'U', uart2 only): data "<protocol> <data>"
        for BTN01 in, POT01 in (on a change), CTRL0 and MOTOR sets/commands in over MQTT,
-       LIFT0 commands in, the LIFT0 done frame, LED01 out (on a change).
+       LIFT0 commands in, the LIFT0 done frame, RTC00 sets in over MQTT,
+       LED01 out (on a change).
        e.g. DBG00U123008BTN01 1P. Never the CTRL0 status frame, reads, HBT01.
 
 Removed: LED01 uart2<->radio relay, RAD00, MQTT0, TACHO, the test mqtt client.

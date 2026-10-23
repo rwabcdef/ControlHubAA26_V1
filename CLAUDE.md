@@ -117,7 +117,8 @@ USER CODE blocks that matter and are easy to lose:
   `SetTime`/`SetDate` in `MX_RTC_Init()` that resets the clock on every reset. The RTC
   (LSE crystal) runs through a reset but not a power cycle (no VBAT battery); `Rtc`
   keeps a "set" marker in backup register DR0. `fatfs.c` `get_fattime` stamps files
-  from it via `rtcGetFatTime()` (`main_tasks.cpp`).
+  from it via `rtcGetFatTime()` (`main_tasks.cpp`). The RTC00 socket (MQTT and uart2)
+  sets and reads it; both PC apps set it once per app run when they connect.
 - Not USER CODE, but related: ST's `FatFs/src/diskio.c` initialises the SD card only once
   per boot (`disk.is_initialized[]` is never cleared), so a re-inserted card is never
   re-identified and its first read hangs 30 s. `SdCard::mount()` clears the flag before
@@ -172,9 +173,9 @@ Layers, bottom to top (`Frame` ↔ `Reader`/`Writer` ↔ `Transport` ↔ `Socket
 - **`Socket`** — `transport.acquireSocket("PROTO", receiveCallback, instantHandler)`.
   **`SERLINK_CONFIG__MAX_SOCKETS` is 10** (`SerLink_config.hpp`, per transport) and an
   acquire past the limit returns a silent `nullptr`, so every socket pointer is checked
-  before use. transport0 (uart2) holds MOTOR, CTRL0, ADC00, SDC00 and DBG00 (the last
+  before use. transport0 (uart2) holds MOTOR, CTRL0, ADC00, RTC00, SDC00 and DBG00 (the last
   acquired from serLink0Task); transport1 (radio) holds LED01, BTN01, POT01, HBT01 and
-  DBG00; transport2 (MQTT) holds DBG00, CTRL0, MOTOR and LIFT0. `sockets_summary.txt` at the
+  DBG00; transport2 (MQTT) holds DBG00, CTRL0, MOTOR, LIFT0 and RTC00. `sockets_summary.txt` at the
   repo root lists every socket and its frames.
   A socket belongs to one transport, but a handler does not — the same handler functions
   can back sockets on several transports (CTRL0 on uart2 and MQTT post to the same
@@ -360,7 +361,7 @@ server runs from `Core/Src/httpd_app.c`.
 USART2 on **PD5 (TX) / PD6 (RX)** via an FTDI cable on CN9 — *not* the ST-LINK virtual COM
 port (that is USART3 on PD8/PD9). 115200 baud, CR+LF line ends. Typing a frame into a
 terminal is a primary way to drive the board (the Electron desktop app, over MQTT, is
-the other); worked examples for the DBG00, MOTOR, CTRL0, LIFT0, ADC00 and SDC00 (SD
+the other); worked examples for the DBG00, MOTOR, CTRL0, LIFT0, ADC00, RTC00 (clock) and SDC00 (SD
 card) sockets are at the top of `Core/Src/main_tasks.cpp`. The CTRL0 status frame goes
 out on MQTT only, so a serial terminal no longer shows it — read `BGA`/`BGO` instead.
 LIFT0 exists only on SerLink2, so it has to go over MQTT (`mosquitto_pub` to
@@ -369,7 +370,7 @@ LIFT0 exists only on SerLink2, so it has to go over MQTT (`mosquitto_pub` to
 The console also shows an **event echo**: `logEvent()` in `main_tasks.cpp` repeats the
 user-driven, low-rate frames from MQTT and the radio as DBG00 `'U'` frames whose data is
 `<protocol> <data>` (e.g. `DBG00U123008BTN01 1P`) — BTN01, POT01 and LED01 on a change,
-CTRL0 and MOTOR sets/commands over MQTT, LIFT0 commands and the done frame. The status frame, reads
+CTRL0 and MOTOR sets/commands over MQTT, LIFT0 commands and the done frame, RTC00 sets over MQTT. The status frame, reads
 (`BG*`, `BT`), HBT01 and the LED01 refresh are deliberately left out.
 
 ## Conventions
